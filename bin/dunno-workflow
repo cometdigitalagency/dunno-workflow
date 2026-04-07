@@ -272,14 +272,15 @@ cmd_start() {
     mkdir -p "$TRIGGER_DIR"
     printf '%s\n' "$MESSAGE" > "$TRIGGER_DIR/${AGENT_NAME}.trigger"
     
-    # Also type the message into the iTerm2 session (for visibility in the pane)
-    MSG_DIR="$SCRIPT_DIR/messages"
-    mkdir -p "$MSG_DIR"
-    MSG_FILE="$MSG_DIR/msg-${AGENT_NAME}-$$.txt"
-    printf '%s\n' "$MESSAGE" > "$MSG_FILE"
-    
+    # Show a brief notice in the iTerm2 pane (NOT the full message — long messages
+    # get truncated by AppleScript and interfere with the worker's polling loop).
+    # The worker reads the full message from the trigger file.
+    AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
+    PREVIEW="${MESSAGE:0:120}"
+    [ ${#MESSAGE} -gt 120 ] && PREVIEW="${PREVIEW}..."
+    NOTICE="--- [$(date '+%H:%M:%S')] Message received (${#MESSAGE} chars): ${PREVIEW} ---"
+
     osascript << EOF 2>/dev/null
-    set msgContent to (do shell script "cat '$MSG_FILE'")
     tell application "iTerm2"
         repeat with w in windows
             repeat with t in tabs of w
@@ -287,7 +288,7 @@ cmd_start() {
                     set sessionName to name of s
                     if sessionName contains "$AGENT_NAME" then
                         tell s
-                            write text msgContent
+                            write text ""
                         end tell
                         return "sent"
                     end if
@@ -297,8 +298,6 @@ cmd_start() {
         return "not_found"
     end tell
 EOF
-    
-    (sleep 5 && rm -f "$MSG_FILE") &
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
     
@@ -533,17 +532,22 @@ LAUNCHER
     # Event-driven loop: wait for trigger file, start Claude with its contents
     while true; do
         if [ -f "\$TRIGGER_FILE" ]; then
-            MESSAGE=\$(cat "\$TRIGGER_FILE")
-            rm -f "\$TRIGGER_FILE"
-            if [ -n "\$MESSAGE" ]; then
+            # Move trigger to a work file so new messages don't collide
+            WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
+            mv "\$TRIGGER_FILE" "\$WORK_FILE"
+            if [ -s "\$WORK_FILE" ]; then
+                PREVIEW=\$(head -c 200 "\$WORK_FILE")
                 echo ""
-                echo "--- [\$(date '+%H:%M:%S')] Received message, starting work session... ---"
+                echo "--- [\$(date '+%H:%M:%S')] Received message (\$(wc -c < "\$WORK_FILE" | tr -d ' ') bytes) ---"
+                echo "    \${PREVIEW:0:200}..."
                 echo ""
-                claude -p --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}" "\$MESSAGE"
+                # Pipe from file to avoid CLI argument length limits on long messages
+                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}"
                 echo ""
                 echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
                 echo ""
             fi
+            rm -f "\$WORK_FILE"
         else
             sleep 1
         fi

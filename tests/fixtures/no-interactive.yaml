@@ -1,0 +1,34 @@
+project:
+  name: no-interactive-test
+  repo: test/repo
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+
+agents:
+  agent1:
+    role: Agent One
+    interactive: false
+    description: First agent
+    owns: { paths: [], never_edit: [] }
+    workflow: ["Do stuff"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+  agent2:
+    role: Agent Two
+    interactive: false
+    description: Second agent
+    owns: { paths: [], never_edit: [] }
+    workflow: ["Do stuff"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

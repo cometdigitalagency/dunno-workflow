@@ -1,0 +1,24 @@
+project:
+  name: one-agent-test
+  repo: test/repo
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+
+agents:
+  solo:
+    role: Solo Agent
+    interactive: true
+    description: Only agent
+    owns: { paths: [], never_edit: [] }
+    workflow: ["Do everything"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

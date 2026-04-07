@@ -1,0 +1,32 @@
+project:
+  name: missing-tickets-test
+  repo: test/repo
+
+tickets:
+  source: ""
+
+agents:
+  lead:
+    role: Lead
+    interactive: true
+    description: Lead agent
+    owns: { paths: [], never_edit: [] }
+    workflow: ["Take input"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+  worker:
+    role: Worker
+    interactive: false
+    description: Worker agent
+    owns: { paths: [], never_edit: [] }
+    workflow: ["Do work"]
+    rules: []
+    init:
+      default: "Waiting."
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

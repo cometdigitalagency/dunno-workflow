@@ -1,0 +1,68 @@
+project:
+  name: github-test
+  repo: myorg/myrepo
+
+tickets:
+  source: github
+  github:
+    repo: myorg/myrepo
+    labels:
+      ready: ready
+      in_progress: in-progress
+      done: done
+
+events:
+  task:
+    description: Work assignment
+    format: "TASK [Issue #{issue}]: {description}"
+    direction: pm -> worker
+
+agents:
+  pm:
+    role: Project Manager
+    description: Creates tickets
+    interactive: true
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [task]
+    receives: []
+    workflow:
+      - "Take user input"
+      - "Create tickets"
+    rules:
+      - "Do not write code"
+    commands:
+      status: "List open tickets"
+    init:
+      default: "I'm the PM."
+      test: "{default}"
+      issue: "Working on #{issue_num}."
+    prompt_extra: ""
+
+  worker:
+    role: Developer
+    description: Implements features
+    interactive: false
+    model: sonnet
+    tools: [read, edit, write, bash]
+    owns: { paths: ["src/**"], never_edit: [] }
+    stack: [Python]
+    sends: []
+    receives: [task]
+    workflow:
+      - "Wait for TASK message"
+      - "Execute task"
+      - "Commit changes"
+    rules:
+      - "Follow patterns"
+    init:
+      default: "Waiting for tasks."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false
