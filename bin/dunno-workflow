@@ -11,7 +11,7 @@
 
 set -e
 
-VERSION="0.1.2"
+VERSION="0.1.3"
 
 # ==================== Commands ====================
 
@@ -460,12 +460,37 @@ HELPER
     
     # ==================== Generate Launcher Scripts ====================
     
+    # Map workflow.yaml tool names to Claude Code --allowedTools names
+    get_allowed_tools() {
+        local agent="$1"
+        local tools_list=""
+        while IFS= read -r tool; do
+            case "$tool" in
+                read)          tools_list+="Read," ;;
+                edit)          tools_list+="Edit," ;;
+                write)         tools_list+="Write," ;;
+                bash)          tools_list+="Bash(*)," ;;
+                glob)          tools_list+="Glob," ;;
+                grep)          tools_list+="Grep," ;;
+                task_list)     tools_list+="TaskList," ;;
+                task_create)   tools_list+="TaskCreate," ;;
+                task_update)   tools_list+="TaskUpdate," ;;
+                send_message)  tools_list+="SendMessage," ;;
+                *)             tools_list+="${tool}," ;;
+            esac
+        done < <(yq_get ".agents.$agent.tools[]" 2>/dev/null)
+        # Remove trailing comma
+        echo "${tools_list%,}"
+    }
+
     generate_launcher() {
         local agent="$1"
         local interactive
         interactive=$(yq_get ".agents.$agent.interactive")
         local label
         label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
+        local allowed_tools
+        allowed_tools=$(get_allowed_tools "$agent")
     
         if [ "$interactive" = "true" ]; then
             # Interactive agent (PM) — single session, no restart loop
@@ -506,7 +531,7 @@ HELPER
     echo ""
     
     while true; do
-        claude --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}" "\$INIT_PROMPT"
+        claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
         echo ""
         echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
         sleep 5
@@ -542,7 +567,7 @@ LAUNCHER
                 echo "    \${PREVIEW:0:200}..."
                 echo ""
                 # Pipe from file to avoid CLI argument length limits on long messages
-                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}"
+                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
                 echo ""
                 echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
                 echo ""
