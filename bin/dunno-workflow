@@ -5,18 +5,13 @@
 # Reads workflow.yaml from the current directory to configure agents, events,
 # ticket sources, and layout. Generates prompts, launchers, and iTerm2 panes.
 #
-# Usage:
-#   dunno-workflow start                  # Start full team
-#   dunno-workflow start --issue 5        # Start team on a specific issue
-#   dunno-workflow start --test           # Test mode with mock issue
-#   dunno-workflow start --debug          # Enable LOGS pane
-#   dunno-workflow init                   # Create workflow.yaml template
-#   dunno-workflow validate               # Validate workflow.yaml
+# Install: brew install cometdigitalagency/dunno/dunno-workflow
+# Usage:   dunno-workflow start [--debug] [--test] [--issue N]
 # =============================================================================
 
 set -e
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 # ==================== Commands ====================
 
@@ -34,97 +29,57 @@ show_help() {
     echo "  --issue, -i <num>   Ticket number to work on"
     echo "  --test, -t          Test mode — mock issue, no ticket source needed"
     echo "  --debug, -d         Enable LOGS pane with filtered session logging"
-    echo ""
-    echo "Getting started:"
-    echo "  cd your-project"
-    echo "  dunno-workflow init"
-    echo "  vim workflow.yaml      # customize agents, ticket source, etc."
-    echo "  dunno-workflow start"
 }
 
-cmd_version() {
-    echo "dunno-workflow v${VERSION}"
+cmd_version() { echo "dunno-workflow v${VERSION}"; }
+
+get_template_dir() {
+    local script_path
+    script_path="$(cd "$(dirname "$0")" && pwd)"
+    if [ -d "$script_path/../share/dunno-workflow/templates" ]; then
+        echo "$script_path/../share/dunno-workflow/templates"; return
+    fi
+    if [ -d "$script_path/../templates" ]; then
+        echo "$script_path/../templates"; return
+    fi
+    echo "ERROR: Could not find template directory" >&2; exit 1
 }
 
 cmd_init() {
     if [ -f "workflow.yaml" ]; then
-        echo "workflow.yaml already exists in this directory."
-        echo "Remove it first if you want to start fresh."
-        exit 1
+        echo "workflow.yaml already exists. Remove it first to start fresh."; exit 1
     fi
-
-    TEMPLATE_DIR="$(get_template_dir)"
-    cp "$TEMPLATE_DIR/workflow.yaml" ./workflow.yaml
+    local tpl; tpl="$(get_template_dir)"
+    cp "$tpl/workflow.yaml" ./workflow.yaml
     mkdir -p tickets
-    cp "$TEMPLATE_DIR/tickets/TEMPLATE.md" ./tickets/TEMPLATE.md
+    if [ -f "$tpl/tickets/TEMPLATE.md" ]; then cp "$tpl/tickets/TEMPLATE.md" ./tickets/TEMPLATE.md; fi
     echo "Created workflow.yaml and tickets/TEMPLATE.md"
     echo "Edit workflow.yaml to configure your agent team, then run: dunno-workflow start"
 }
 
 cmd_validate() {
-    local wf="workflow.yaml"
-    if [ ! -f "$wf" ]; then
-        echo "ERROR: workflow.yaml not found in current directory"
-        exit 1
-    fi
-
-    if ! command -v yq &>/dev/null; then
-        echo "ERROR: yq is required. Install with: brew install yq"
-        exit 1
-    fi
-
-    # Check required fields
+    if [ ! -f "workflow.yaml" ]; then echo "ERROR: workflow.yaml not found"; exit 1; fi
+    if ! command -v yq &>/dev/null; then echo "ERROR: yq required. brew install yq"; exit 1; fi
     local errors=0
-
-    if [ "$(yq '.project.name // ""' "$wf")" = "" ]; then
-        echo "ERROR: project.name is required"
-        ((errors++))
-    fi
-
-    if [ "$(yq '.tickets.source // ""' "$wf")" = "" ]; then
-        echo "ERROR: tickets.source is required"
-        ((errors++))
-    fi
-
-    local agent_count
-    agent_count=$(yq '.agents | length' "$wf")
-    if [ "$agent_count" -lt 2 ]; then
-        echo "ERROR: at least 2 agents are required"
-        ((errors++))
-    fi
-
-    # Check for exactly one interactive agent
-    local interactive_count
-    interactive_count=$(yq '[.agents[] | select(.interactive == true)] | length' "$wf")
-    if [ "$interactive_count" -ne 1 ]; then
-        echo "ERROR: exactly one agent must have interactive: true (found $interactive_count)"
-        ((errors++))
-    fi
-
+    [ "$(yq '.project.name // ""' workflow.yaml)" = "" ] && echo "ERROR: project.name required" && ((errors++))
+    [ "$(yq '.tickets.source // ""' workflow.yaml)" = "" ] && echo "ERROR: tickets.source required" && ((errors++))
+    local ic; ic=$(yq '[.agents[] | select(.interactive == true)] | length' workflow.yaml)
+    [ "$ic" -ne 1 ] && echo "ERROR: exactly one agent must have interactive: true (found $ic)" && ((errors++))
     if [ "$errors" -eq 0 ]; then
         echo "workflow.yaml is valid"
-        echo "  Project: $(yq '.project.name' "$wf")"
-        echo "  Ticket source: $(yq '.tickets.source' "$wf")"
-        echo "  Agents: $(yq '.agents | keys | join(", ")' "$wf")"
-    else
-        echo ""
-        echo "$errors error(s) found"
-        exit 1
-    fi
+        echo "  Project: $(yq '.project.name' workflow.yaml)"
+        echo "  Ticket source: $(yq '.tickets.source' workflow.yaml)"
+        echo "  Agents: $(yq '.agents | keys | join(", ")' workflow.yaml)"
+    else echo ""; echo "$errors error(s)"; exit 1; fi
 }
 
 cmd_stop() {
     echo "Stopping agent sessions..."
-    local agents
-    agents=$(yq '.agents | keys | .[]' workflow.yaml 2>/dev/null || echo "PM ARCHITECT BACKEND FRONTEND QA")
     local names=""
-    for agent in $agents; do
-        local label
-        label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-        names+="\"${label}\", "
+    for agent in $(yq '.agents | keys | .[]' workflow.yaml 2>/dev/null || echo "PM ARCHITECT BACKEND FRONTEND QA"); do
+        names+="\"$(echo "$agent" | tr '[:lower:]' '[:upper:]')\", "
     done
     names+="\"LOGS\""
-
     osascript << ENDSCRIPT 2>/dev/null || true
 tell application "iTerm2"
     set agentNames to {${names}}
@@ -145,73 +100,66 @@ ENDSCRIPT
     echo "Done."
 }
 
-get_template_dir() {
-    # Check common install locations
-    local script_path
-    script_path="$(cd "$(dirname "$0")" && pwd)"
-
-    # Homebrew: ../share/dunno-workflow/templates
-    if [ -d "$script_path/../share/dunno-workflow/templates" ]; then
-        echo "$script_path/../share/dunno-workflow/templates"
-        return
-    fi
-
-    # Local dev: same directory
-    if [ -d "$script_path/../templates" ]; then
-        echo "$script_path/../templates"
-        return
-    fi
-
-    echo "ERROR: Could not find template directory" >&2
-    exit 1
-}
-
-# ==================== Main Engine ====================
+# ==================== Start Command (engine) ====================
 
 cmd_start() {
-    local REPO_DIR="$(pwd)"
-    local WORKFLOW_FILE="${REPO_DIR}/workflow.yaml"
-    local ISSUE_NUM=""
-    local TEST_MODE=false
-    local DEBUG_MODE=false
-
-    # Parse start options
+    set -e
+    
+    REPO_DIR="$(pwd)"
+    WORKFLOW_FILE="${REPO_DIR}/workflow.yaml"
+    ISSUE_NUM=""
+    TEST_MODE=false
+    DEBUG_MODE=false
+    
+    # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             --issue|-i) ISSUE_NUM="$2"; shift 2 ;;
             --test|-t)  TEST_MODE=true; shift ;;
             --debug|-d) DEBUG_MODE=true; shift ;;
+            --help|-h)
+                echo "Usage: ./run-team.sh [--issue <number>] [--test] [--debug]"
+                echo ""
+                echo "Options:"
+                echo "  --issue, -i <num>   Ticket number to work on"
+                echo "  --test, -t          Test mode — mock issue, no ticket source needed"
+                echo "  --debug, -d         Enable LOGS pane with filtered session logging"
+                echo "  --help, -h          Show this help"
+                exit 0 ;;
             *) echo "Unknown option: $1"; exit 1 ;;
         esac
     done
-
-    # Dependencies
+    
+    # ==================== Dependencies ====================
+    
     if ! command -v yq &>/dev/null; then
-        echo "ERROR: yq is required. Install with: brew install yq"
+        echo "ERROR: yq is required but not installed."
+        echo "  brew install yq"
         exit 1
     fi
-
+    
     if [ ! -f "$WORKFLOW_FILE" ]; then
-        echo "ERROR: workflow.yaml not found. Run 'dunno-workflow init' first."
+        echo "ERROR: workflow.yaml not found at $WORKFLOW_FILE"
         exit 1
     fi
-
-    # ── Read workflow.yaml ──
-
+    
+    # ==================== Read workflow.yaml ====================
+    
     yq_get() { yq "$1" "$WORKFLOW_FILE"; }
-
-    local PROJECT_NAME REPO_NAME TICKET_SOURCE
+    
     PROJECT_NAME=$(yq_get '.project.name')
-    REPO_NAME=$(yq_get '.project.repo // ""')
+    REPO_NAME=$(yq_get '.project.repo')
     TICKET_SOURCE=$(yq_get '.tickets.source')
-
-    local AGENTS=()
+    
+    # Read agent names (preserving YAML key order)
+    AGENTS=()
     while IFS= read -r agent; do
         AGENTS+=("$agent")
     done < <(yq_get '.agents | keys | .[]')
-
-    local INTERACTIVE_AGENT=""
-    local WORKER_AGENTS=()
+    
+    # Identify interactive agent (PM) vs workers
+    INTERACTIVE_AGENT=""
+    WORKER_AGENTS=()
     for agent in "${AGENTS[@]}"; do
         if [ "$(yq_get ".agents.$agent.interactive")" = "true" ]; then
             INTERACTIVE_AGENT="$agent"
@@ -219,155 +167,165 @@ cmd_start() {
             WORKER_AGENTS+=("$agent")
         fi
     done
-
+    
+    # Check debug_pane from YAML or --debug flag
     if [ "$(yq_get '.layout.debug_pane')" = "true" ]; then
         DEBUG_MODE=true
     fi
-
-    local PROMPT_DIR="${REPO_DIR}/.team-prompts"
+    
+    # Create directories
+    PROMPT_DIR="${REPO_DIR}/.team-prompts"
     mkdir -p "$PROMPT_DIR"
-
-    local LOG_DIR=""
+    
     if [ "$DEBUG_MODE" = true ]; then
         LOG_DIR="${REPO_DIR}/.team-logs/$(date '+%Y-%m-%d_%H-%M-%S')"
         mkdir -p "$LOG_DIR"
     fi
-
-    # ── Ticket Source Commands ──
-
-    local TICKET_CREATE TICKET_LIST_READY TICKET_VIEW TICKET_CLAIM
-    local TICKET_COMMENT TICKET_CLOSE TICKET_LIST_OPEN TICKET_LIST_STALE
-
-    case "$TICKET_SOURCE" in
-        github)
-            local gh_repo
-            gh_repo=$(yq_get '.tickets.github.repo // .project.repo')
-            local lbl_ready lbl_inprog lbl_done
-            lbl_ready=$(yq_get '.tickets.github.labels.ready')
-            lbl_inprog=$(yq_get '.tickets.github.labels.in_progress')
-            lbl_done=$(yq_get '.tickets.github.labels.done')
-            TICKET_CREATE="gh issue create --repo ${gh_repo} --title \"\$TITLE\" --label \"${lbl_ready},feature\" --body \"\$BODY\""
-            TICKET_LIST_READY="gh issue list --repo ${gh_repo} --label ${lbl_ready} --state open --json number,title --jq '.[0].number // empty'"
-            TICKET_VIEW="gh issue view \$N --repo ${gh_repo}"
-            TICKET_CLAIM="gh issue edit \$N --repo ${gh_repo} --remove-label ${lbl_ready} --add-label ${lbl_inprog}"
-            TICKET_COMMENT="gh issue comment \$N --repo ${gh_repo} --body \"\$MSG\""
-            TICKET_CLOSE="gh issue close \$N --repo ${gh_repo} && gh issue edit \$N --repo ${gh_repo} --remove-label ${lbl_inprog} --add-label ${lbl_done}"
-            TICKET_LIST_OPEN="gh issue list --repo ${gh_repo} --state open"
-            TICKET_LIST_STALE="gh issue list --repo ${gh_repo} --label ${lbl_inprog} --state open --json number,title --jq '.[] | \"\\(.number) \\(.title)\"'"
-            ;;
-        file)
-            local dir
-            dir=$(yq_get '.tickets.file.directory // "./tickets"')
-            TICKET_CREATE="echo '---\nid: \$(ls ${dir}/*.md 2>/dev/null | wc -l | tr -d \" \")\ntitle: '\"\$TITLE\"'\nstatus: ready\nlabels: [feature]\ncreated: \$(date +%Y-%m-%d)\n---\n\n\$BODY' > '${dir}/\$(date +%s).md'"
-            TICKET_LIST_READY="grep -rl 'status: ready' ${dir}/*.md 2>/dev/null | head -1"
-            TICKET_VIEW="cat \$N"
-            TICKET_CLAIM="sed -i '' 's/status: ready/status: in-progress/' \$N"
-            TICKET_COMMENT="echo -e '\n---\n### \$MSG\n\$(date)' >> \$N"
-            TICKET_CLOSE="sed -i '' 's/status: in-progress/status: done/' \$N"
-            TICKET_LIST_OPEN="grep -rl 'status: \\(ready\\|in-progress\\)' ${dir}/*.md 2>/dev/null"
-            TICKET_LIST_STALE="grep -rl 'status: in-progress' ${dir}/*.md 2>/dev/null"
-            ;;
-        jira)
-            local server project_key st_ready st_inprog st_done
-            server=$(yq_get '.tickets.jira.server')
-            project_key=$(yq_get '.tickets.jira.project_key')
-            st_ready=$(yq_get '.tickets.jira.statuses.ready')
-            st_inprog=$(yq_get '.tickets.jira.statuses.in_progress')
-            st_done=$(yq_get '.tickets.jira.statuses.done')
-            TICKET_CREATE="jira issue create --project ${project_key} --type Task --summary \"\$TITLE\" --body \"\$BODY\""
-            TICKET_LIST_READY="jira issue list --project ${project_key} --status \"${st_ready}\" --plain --no-headers | head -1 | awk '{print \$1}'"
-            TICKET_VIEW="jira issue view \$N"
-            TICKET_CLAIM="jira issue move \$N \"${st_inprog}\""
-            TICKET_COMMENT="jira issue comment add \$N --body \"\$MSG\""
-            TICKET_CLOSE="jira issue move \$N \"${st_done}\""
-            TICKET_LIST_OPEN="jira issue list --project ${project_key} --status \"${st_ready}\" --status \"${st_inprog}\""
-            TICKET_LIST_STALE="jira issue list --project ${project_key} --status \"${st_inprog}\" --plain --no-headers"
-            ;;
-        clickup)
-            local list_id st_ready st_inprog st_done
-            list_id=$(yq_get '.tickets.clickup.list_id')
-            st_ready=$(yq_get '.tickets.clickup.statuses.ready')
-            st_inprog=$(yq_get '.tickets.clickup.statuses.in_progress')
-            st_done=$(yq_get '.tickets.clickup.statuses.done')
-            TICKET_CREATE="clickup task create --list-id ${list_id} --name \"\$TITLE\" --description \"\$BODY\" --status \"${st_ready}\""
-            TICKET_LIST_READY="clickup task list --list-id ${list_id} --status \"${st_ready}\" | head -1 | awk '{print \$1}'"
-            TICKET_VIEW="clickup task view \$N"
-            TICKET_CLAIM="clickup task update \$N --status \"${st_inprog}\""
-            TICKET_COMMENT="clickup task comment \$N --text \"\$MSG\""
-            TICKET_CLOSE="clickup task update \$N --status \"${st_done}\""
-            TICKET_LIST_OPEN="clickup task list --list-id ${list_id}"
-            TICKET_LIST_STALE="clickup task list --list-id ${list_id} --status \"${st_inprog}\""
-            ;;
-        *)
-            echo "ERROR: Unknown ticket source: $TICKET_SOURCE"
-            exit 1 ;;
-    esac
-
-    # ── Helper: send-to-agent.sh ──
-
+    
+    # ==================== Ticket Source Functions ====================
+    # Generate ticket CLI commands based on tickets.source
+    
+    generate_ticket_commands() {
+        local source="$1"
+        case "$source" in
+            github)
+                local gh_repo
+                gh_repo=$(yq_get '.tickets.github.repo // .project.repo')
+                local lbl_ready lbl_inprog lbl_done
+                lbl_ready=$(yq_get '.tickets.github.labels.ready')
+                lbl_inprog=$(yq_get '.tickets.github.labels.in_progress')
+                lbl_done=$(yq_get '.tickets.github.labels.done')
+    
+                TICKET_CREATE="gh issue create --repo ${gh_repo} --title \"\$TITLE\" --label \"${lbl_ready},feature\" --body \"\$BODY\""
+                TICKET_LIST_READY="gh issue list --repo ${gh_repo} --label ${lbl_ready} --state open --json number,title --jq '.[0].number // empty'"
+                TICKET_VIEW="gh issue view \$N --repo ${gh_repo}"
+                TICKET_CLAIM="gh issue edit \$N --repo ${gh_repo} --remove-label ${lbl_ready} --add-label ${lbl_inprog}"
+                TICKET_COMMENT="gh issue comment \$N --repo ${gh_repo} --body \"\$MSG\""
+                TICKET_CLOSE="gh issue close \$N --repo ${gh_repo} && gh issue edit \$N --repo ${gh_repo} --remove-label ${lbl_inprog} --add-label ${lbl_done}"
+                TICKET_LIST_OPEN="gh issue list --repo ${gh_repo} --state open"
+                TICKET_LIST_STALE="gh issue list --repo ${gh_repo} --label ${lbl_inprog} --state open --json number,title --jq '.[] | \"\\(.number) \\(.title)\"'"
+                ;;
+            file)
+                local dir
+                dir=$(yq_get '.tickets.file.directory // "./tickets"')
+                TICKET_CREATE="echo '---\nid: \$(ls ${dir}/*.md 2>/dev/null | wc -l | tr -d \" \")\ntitle: '\"\$TITLE\"'\nstatus: ready\nlabels: [feature]\ncreated: \$(date +%Y-%m-%d)\n---\n\n\$BODY' > '${dir}/\$(date +%s).md'"
+                TICKET_LIST_READY="grep -rl 'status: ready' ${dir}/*.md 2>/dev/null | head -1"
+                TICKET_VIEW="cat \$N"
+                TICKET_CLAIM="sed -i '' 's/status: ready/status: in-progress/' \$N"
+                TICKET_COMMENT="echo -e '\n---\n### \$MSG\n\$(date)' >> \$N"
+                TICKET_CLOSE="sed -i '' 's/status: in-progress/status: done/' \$N"
+                TICKET_LIST_OPEN="grep -rl 'status: \\(ready\\|in-progress\\)' ${dir}/*.md 2>/dev/null"
+                TICKET_LIST_STALE="grep -rl 'status: in-progress' ${dir}/*.md 2>/dev/null"
+                ;;
+            jira)
+                local server project_key
+                server=$(yq_get '.tickets.jira.server')
+                project_key=$(yq_get '.tickets.jira.project_key')
+                local st_ready st_inprog st_done
+                st_ready=$(yq_get '.tickets.jira.statuses.ready')
+                st_inprog=$(yq_get '.tickets.jira.statuses.in_progress')
+                st_done=$(yq_get '.tickets.jira.statuses.done')
+                TICKET_CREATE="jira issue create --project ${project_key} --type Task --summary \"\$TITLE\" --body \"\$BODY\""
+                TICKET_LIST_READY="jira issue list --project ${project_key} --status \"${st_ready}\" --plain --no-headers | head -1 | awk '{print \$1}'"
+                TICKET_VIEW="jira issue view \$N"
+                TICKET_CLAIM="jira issue move \$N \"${st_inprog}\""
+                TICKET_COMMENT="jira issue comment add \$N --body \"\$MSG\""
+                TICKET_CLOSE="jira issue move \$N \"${st_done}\""
+                TICKET_LIST_OPEN="jira issue list --project ${project_key} --status \"${st_ready}\" --status \"${st_inprog}\""
+                TICKET_LIST_STALE="jira issue list --project ${project_key} --status \"${st_inprog}\" --plain --no-headers"
+                ;;
+            clickup)
+                local list_id
+                list_id=$(yq_get '.tickets.clickup.list_id')
+                local st_ready st_inprog st_done
+                st_ready=$(yq_get '.tickets.clickup.statuses.ready')
+                st_inprog=$(yq_get '.tickets.clickup.statuses.in_progress')
+                st_done=$(yq_get '.tickets.clickup.statuses.done')
+                TICKET_CREATE="clickup task create --list-id ${list_id} --name \"\$TITLE\" --description \"\$BODY\" --status \"${st_ready}\""
+                TICKET_LIST_READY="clickup task list --list-id ${list_id} --status \"${st_ready}\" | head -1 | awk '{print \$1}'"
+                TICKET_VIEW="clickup task view \$N"
+                TICKET_CLAIM="clickup task update \$N --status \"${st_inprog}\""
+                TICKET_COMMENT="clickup task comment \$N --text \"\$MSG\""
+                TICKET_CLOSE="clickup task update \$N --status \"${st_done}\""
+                TICKET_LIST_OPEN="clickup task list --list-id ${list_id}"
+                TICKET_LIST_STALE="clickup task list --list-id ${list_id} --status \"${st_inprog}\""
+                ;;
+            *)
+                echo "ERROR: Unknown ticket source: $source"
+                exit 1 ;;
+        esac
+    }
+    
+    generate_ticket_commands "$TICKET_SOURCE"
+    
+    # ==================== Helper: send-to-agent.sh ====================
+    
     cat > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENT_NAME=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-shift
-MESSAGE="$*"
-
-# Write trigger file for the worker's file-watch loop
-TRIGGER_DIR="$SCRIPT_DIR/triggers"
-mkdir -p "$TRIGGER_DIR"
-printf '%s\n' "$MESSAGE" > "$TRIGGER_DIR/${AGENT_NAME}.trigger"
-
-# Also type the message into the iTerm2 session (for visibility in the pane)
-MSG_DIR="$SCRIPT_DIR/messages"
-mkdir -p "$MSG_DIR"
-MSG_FILE="$MSG_DIR/msg-${AGENT_NAME}-$$.txt"
-printf '%s\n' "$MESSAGE" > "$MSG_FILE"
-
-osascript << EOF 2>/dev/null
-set msgContent to (do shell script "cat '$MSG_FILE'")
-tell application "iTerm2"
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                set sessionName to name of s
-                if sessionName contains "$AGENT_NAME" then
-                    tell s
-                        write text msgContent
-                    end tell
-                    return "sent"
-                end if
+    #!/bin/bash
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    AGENT_NAME=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    shift
+    MESSAGE="$*"
+    
+    # Write trigger file for the worker's file-watch loop
+    TRIGGER_DIR="$SCRIPT_DIR/triggers"
+    mkdir -p "$TRIGGER_DIR"
+    printf '%s\n' "$MESSAGE" > "$TRIGGER_DIR/${AGENT_NAME}.trigger"
+    
+    # Also type the message into the iTerm2 session (for visibility in the pane)
+    MSG_DIR="$SCRIPT_DIR/messages"
+    mkdir -p "$MSG_DIR"
+    MSG_FILE="$MSG_DIR/msg-${AGENT_NAME}-$$.txt"
+    printf '%s\n' "$MESSAGE" > "$MSG_FILE"
+    
+    osascript << EOF 2>/dev/null
+    set msgContent to (do shell script "cat '$MSG_FILE'")
+    tell application "iTerm2"
+        repeat with w in windows
+            repeat with t in tabs of w
+                repeat with s in sessions of t
+                    set sessionName to name of s
+                    if sessionName contains "$AGENT_NAME" then
+                        tell s
+                            write text msgContent
+                        end tell
+                        return "sent"
+                    end if
+                end repeat
             end repeat
         end repeat
-    end repeat
-    return "not_found"
-end tell
+        return "not_found"
+    end tell
 EOF
-
-(sleep 5 && rm -f "$MSG_FILE") &
+    
+    (sleep 5 && rm -f "$MSG_FILE") &
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
-
-    # ── Generate System Prompts ──
-
+    
+    # ==================== Generate System Prompts ====================
+    
     generate_system_prompt() {
         local agent="$1"
         local role description interactive
         role=$(yq_get ".agents.$agent.role")
         description=$(yq_get ".agents.$agent.description")
         interactive=$(yq_get ".agents.$agent.interactive")
-
+    
         local prompt=""
         prompt+="You are the ${role} for the ${PROJECT_NAME} platform. ${description}\n\n"
-
+    
+        # Workflow steps
         prompt+="## YOUR WORKFLOW\n"
         local step_num=1
         while IFS= read -r step; do
+            # Interpolate ticket commands into workflow steps
             step="${step//\{repo\}/$REPO_NAME}"
             prompt+="${step_num}. ${step}\n"
             ((step_num++))
         done < <(yq_get ".agents.$agent.workflow[]")
         prompt+="\n"
-
+    
+        # Communicating with agents
         prompt+="## COMMUNICATING WITH AGENTS\n"
         prompt+="You can send messages to any agent by running bash commands:\n"
         for other in "${AGENTS[@]}"; do
@@ -378,7 +336,8 @@ HELPER
             fi
         done
         prompt+="\n"
-
+    
+        # Ticket commands section
         prompt+="## TICKET COMMANDS (source: ${TICKET_SOURCE})\n"
         prompt+="- Create ticket: ${TICKET_CREATE}\n"
         prompt+="- List ready tickets: ${TICKET_LIST_READY}\n"
@@ -389,7 +348,8 @@ HELPER
         prompt+="- List open tickets: ${TICKET_LIST_OPEN}\n"
         prompt+="- List stale in-progress tickets: ${TICKET_LIST_STALE}\n"
         prompt+="\n"
-
+    
+        # Rules
         local rules_count
         rules_count=$(yq_get ".agents.$agent.rules | length")
         if [ "$rules_count" != "0" ]; then
@@ -399,7 +359,8 @@ HELPER
             done < <(yq_get ".agents.$agent.rules[]")
             prompt+="\n"
         fi
-
+    
+        # File ownership
         local owns_count never_count
         owns_count=$(yq_get ".agents.$agent.owns.paths | length")
         never_count=$(yq_get ".agents.$agent.owns.never_edit | length")
@@ -417,11 +378,13 @@ HELPER
             fi
             prompt+="\n"
         fi
-
+    
+        # Commands (for PM-like agents)
         local cmds_count
         cmds_count=$(yq_get ".agents.$agent.commands // {} | length")
         if [ "$cmds_count" != "0" ]; then
             prompt+="## COMMANDS (when the user says these)\n"
+            # Use yq to emit key=value pairs directly to avoid quoting issues
             while IFS= read -r line; do
                 local key="${line%%=*}"
                 local val="${line#*=}"
@@ -430,78 +393,83 @@ HELPER
             done < <(yq_get ".agents.$agent.commands // {} | to_entries | .[] | .key + \"=\" + .value")
             prompt+="\n"
         fi
-
+    
+        # Extra prompt text
         local extra
         extra=$(yq_get ".agents.$agent.prompt_extra // \"\"")
         if [ -n "$extra" ] && [ "$extra" != "\"\"" ] && [ "$extra" != "" ]; then
             prompt+="\n${extra}\n"
         fi
-
+    
+        # Important rules for event-driven agents
         if [ "$interactive" != "true" ]; then
             prompt+="## IMPORTANT\n"
             prompt+="- If the PM sends you a message (stop, pause, status), handle it immediately.\n"
             prompt+="- ALWAYS post your done marker on the ticket when you finish your tasks.\n"
         fi
-
+    
         printf '%b' "$prompt" > "$PROMPT_DIR/${agent}-system.txt"
     }
-
-    # ── Generate Init Prompts ──
-
+    
+    # ==================== Generate Init Prompts ====================
+    
     generate_init_prompt() {
         local agent="$1"
         local mode="default"
         [ "$TEST_MODE" = true ] && mode="test"
         [ -n "$ISSUE_NUM" ] && mode="issue"
-
+    
         local init_text
         init_text=$(yq_get ".agents.$agent.init.$mode // .agents.$agent.init.default")
-
+    
+        # Handle {default} self-reference
         if [ "$init_text" = "{default}" ]; then
             init_text=$(yq_get ".agents.$agent.init.default")
         fi
-
+    
+        # Interpolate placeholders
         init_text="${init_text//\{issue_num\}/$ISSUE_NUM}"
         init_text="${init_text//\{repo\}/$REPO_NAME}"
-
-        # For test mode with file-based tickets, point to tickets directory
-        if [ "$TEST_MODE" = true ] && [ "$(yq_get ".agents.$agent.auto_start // false")" = "true" ] && [ "$TICKET_SOURCE" = "file" ]; then
+    
+        # For test mode with file-based tickets, point architect to the tickets directory
+        if [ "$TEST_MODE" = true ] && [ "$agent" = "architect" ] && [ "$TICKET_SOURCE" = "file" ]; then
             local ticket_dir
             ticket_dir=$(yq_get '.tickets.file.directory // "./tickets"')
             init_text+="
-
-Look for ready tickets in the ${ticket_dir}/ directory. Read each .md file and check the
-frontmatter for 'status: ready'. Pick the first one you find, change its status to
-'status: in-progress' using sed, then plan and dispatch tasks to agents."
-        elif [ "$TEST_MODE" = true ] && [ "$(yq_get ".agents.$agent.auto_start // false")" = "true" ]; then
+    
+    Look for ready tickets in the ${ticket_dir}/ directory. Read each .md file and check the
+    frontmatter for 'status: ready'. Pick the first one you find, change its status to
+    'status: in-progress' using sed, then plan and dispatch tasks to agents."
+        elif [ "$TEST_MODE" = true ] && [ "$agent" = "architect" ]; then
             init_text+="
-
-MOCK ISSUE: Add a GET /ping endpoint
-## Summary
-Add a simple health-check endpoint that returns the service status and current timestamp.
-## Requirements
-- GET /ping endpoint returning JSON with status and timestamp
-- A frontend component showing the service latency
-- Tests covering the new functionality
-## Acceptance Criteria
-- [ ] GET /ping returns 200 with JSON payload
-- [ ] Frontend displays ping latency
-- [ ] All tests pass"
+    
+    MOCK ISSUE: Add a GET /ping endpoint to the Reddit agent
+    ## Summary
+    Add a simple health-check endpoint that returns the service status and current timestamp.
+    ## Requirements
+    - GET /ping endpoint on the Reddit agent returning JSON with status and timestamp
+    - A frontend component showing the service latency
+    - Tests covering the new functionality
+    ## Acceptance Criteria
+    - [ ] GET /ping returns 200 with JSON payload
+    - [ ] Frontend displays ping latency
+    - [ ] All tests pass"
         fi
-
+    
         printf '%s' "$init_text" > "$PROMPT_DIR/${agent}-init.txt"
     }
-
-    # ── Generate Launcher Scripts ──
-
+    
+    # ==================== Generate Launcher Scripts ====================
+    
     generate_launcher() {
         local agent="$1"
         local interactive
         interactive=$(yq_get ".agents.$agent.interactive")
         local label
         label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-
+    
         if [ "$interactive" = "true" ]; then
+            # Interactive agent (PM) — single session, no restart loop
             {
                 echo '#!/bin/bash'
                 echo "cd '${REPO_DIR}'"
@@ -522,256 +490,359 @@ Add a simple health-check endpoint that returns the service status and current t
         else
             local starts_immediately
             starts_immediately=$(yq_get ".agents.$agent.auto_start // false")
-
+    
             if [ "$starts_immediately" = "true" ]; then
+                # Architect — starts immediately, restarts if session ends
                 cat > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
-#!/bin/bash
-cd '${REPO_DIR}'
-printf '\033]0;${label}\007'
-SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
-INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
-
-echo "╔══════════════════════════════════════╗"
-echo "║  ${label} agent"
-echo "║  Starting up..."
-echo "╚══════════════════════════════════════╝"
-echo ""
-
-while true; do
-    claude --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}" "\$INIT_PROMPT"
+    #!/bin/bash
+    cd '${REPO_DIR}'
+    printf '\033]0;${label}\007'
+    SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
+    INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
+    
+    echo "╔══════════════════════════════════════╗"
+    echo "║  ${label} agent"
+    echo "║  Starting up..."
+    echo "╚══════════════════════════════════════╝"
     echo ""
-    echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
-    sleep 5
-done
+    
+    while true; do
+        claude --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}" "\$INIT_PROMPT"
+        echo ""
+        echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
+        sleep 5
+    done
 LAUNCHER
             else
+                # Worker agent — waits for a trigger file, then starts Claude with its contents
                 cat > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
-#!/bin/bash
-cd '${REPO_DIR}'
-printf '\033]0;${label}\007'
-SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
-TRIGGER_DIR='${PROMPT_DIR}/triggers'
-mkdir -p "\$TRIGGER_DIR"
-TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
-
-echo "╔══════════════════════════════════════╗"
-echo "║  ${label} agent"
-echo "║  Idle — waiting for messages..."
-echo "╚══════════════════════════════════════╝"
-echo ""
-
-while true; do
-    if [ -f "\$TRIGGER_FILE" ]; then
-        MESSAGE=\$(cat "\$TRIGGER_FILE")
-        rm -f "\$TRIGGER_FILE"
-        if [ -n "\$MESSAGE" ]; then
-            echo ""
-            echo "--- [\$(date '+%H:%M:%S')] Received message, starting work session... ---"
-            echo ""
-            claude -p --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}" "\$MESSAGE"
-            echo ""
-            echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
-            echo ""
+    #!/bin/bash
+    cd '${REPO_DIR}'
+    printf '\033]0;${label}\007'
+    SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
+    TRIGGER_DIR='${PROMPT_DIR}/triggers'
+    mkdir -p "\$TRIGGER_DIR"
+    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
+    
+    echo "╔══════════════════════════════════════╗"
+    echo "║  ${label} agent"
+    echo "║  Idle — waiting for messages..."
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+    
+    # Event-driven loop: wait for trigger file, start Claude with its contents
+    while true; do
+        if [ -f "\$TRIGGER_FILE" ]; then
+            MESSAGE=\$(cat "\$TRIGGER_FILE")
+            rm -f "\$TRIGGER_FILE"
+            if [ -n "\$MESSAGE" ]; then
+                echo ""
+                echo "--- [\$(date '+%H:%M:%S')] Received message, starting work session... ---"
+                echo ""
+                claude -p --append-system-prompt "\$SYSTEM_PROMPT" -n "${agent}" "\$MESSAGE"
+                echo ""
+                echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
+                echo ""
+            fi
+        else
+            sleep 1
         fi
-    else
-        sleep 1
-    fi
-done
+    done
 LAUNCHER
             fi
         fi
         chmod +x "$PROMPT_DIR/run-${agent}.sh"
     }
-
-    # ── Generate All ──
-
+    
+    # ==================== Generate All Prompts & Launchers ====================
+    
     echo "Reading workflow.yaml..."
     echo "  Project: ${PROJECT_NAME}"
     echo "  Ticket source: ${TICKET_SOURCE}"
     echo "  Agents: ${AGENTS[*]}"
     echo ""
-
+    
     for agent in "${AGENTS[@]}"; do
         generate_system_prompt "$agent"
         generate_init_prompt "$agent"
         generate_launcher "$agent"
     done
-
-    # ── Cleanup Previous Sessions ──
-
+    
+    # ==================== Cleanup Previous Sessions ====================
+    
     echo "Cleaning up previous agent sessions..."
-    local CLEANUP_NAMES=""
+    CLEANUP_NAMES=""
     for agent in "${AGENTS[@]}"; do
-        local lbl
-        lbl=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-        CLEANUP_NAMES+="\"${lbl}\", "
+        label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
+        CLEANUP_NAMES+="\"${label}\", "
     done
     CLEANUP_NAMES+="\"LOGS\""
-
+    
     osascript << ENDSCRIPT 2>/dev/null || true
-tell application "iTerm2"
-    set agentNames to {${CLEANUP_NAMES}}
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                if name of s is in agentNames then
-                    tell s
-                        write text (ASCII character 3)
-                        write text "exit"
-                    end tell
-                end if
+    tell application "iTerm2"
+        set agentNames to {${CLEANUP_NAMES}}
+        repeat with w in windows
+            repeat with t in tabs of w
+                repeat with s in sessions of t
+                    if name of s is in agentNames then
+                        tell s
+                            write text (ASCII character 3)
+                            write text "exit"
+                        end tell
+                    end if
+                end repeat
             end repeat
         end repeat
-    end repeat
-end tell
+    end tell
 ENDSCRIPT
     sleep 2
-
-    # ── Ensure Ticket Source Labels ──
-
+    
+    # ==================== Ensure Ticket Source Labels ====================
+    
     if [ "$TICKET_SOURCE" = "github" ]; then
         echo "Ensuring GitHub labels exist..."
-        local local_repo
         local_repo=$(yq_get '.tickets.github.repo // .project.repo')
         gh label create "$(yq_get '.tickets.github.labels.ready')" --color "0E8A16" --description "Ready for agent team" --repo "$local_repo" 2>/dev/null || true
         gh label create "$(yq_get '.tickets.github.labels.in_progress')" --color "FBCA04" --description "Agent team working" --repo "$local_repo" 2>/dev/null || true
         gh label create "$(yq_get '.tickets.github.labels.done')" --color "6F42C1" --description "Agent team completed" --repo "$local_repo" 2>/dev/null || true
+    
         if [ -n "$ISSUE_NUM" ]; then
             gh issue edit "$ISSUE_NUM" --repo "$local_repo" --add-label "$(yq_get '.tickets.github.labels.ready')" 2>/dev/null || true
         fi
     fi
-
-    # ── Debug: Logging ──
-
+    
+    # ==================== Debug: Logging Scripts ====================
+    
     if [ "$DEBUG_MODE" = true ]; then
-        local AGENT_PY_LIST="" AGENT_PY_COLORS="" AGENT_PY_LABELS=""
-        local COLOR_CODES=("35" "34" "32" "33" "31" "36" "37" "91" "92" "93")
-        local SHORT_LABELS=("PM" "ARCH" "BACK" "FRONT" "QA" "DEV" "OPS" "SEC" "DOC" "INF")
-        local idx=0
-        for agent in "${AGENTS[@]}"; do
-            local slbl=${SHORT_LABELS[$idx]:-$(echo "$agent" | tr '[:lower:]' '[:upper:]' | cut -c1-4)}
-            local clr=${COLOR_CODES[$idx]:-37}
-            AGENT_PY_LIST+="\"${agent}\", "
-            AGENT_PY_COLORS+="    \"${agent}\": \"\\033[${clr}m\",\n"
-            AGENT_PY_LABELS+="    \"${agent}\": \"${slbl}\",\n"
-            ((idx++))
-        done
-
-        cat > "$PROMPT_DIR/screen-logger.py" << PYLOGGER
-#!/usr/bin/env python3
-import iterm2, asyncio, os, re, subprocess, time
-
-LOG_DIR = "${LOG_DIR}"
-POLL_INTERVAL = 2
-AGENTS = [${AGENT_PY_LIST}]
-COLORS = {
-$(printf '%b' "$AGENT_PY_COLORS")}
-BOLD = "\033[1m"
-RESET = "\033[0m"
-LABELS = {
-$(printf '%b' "$AGENT_PY_LABELS")}
-
-SKIP_RE = [re.compile(p, re.IGNORECASE) for p in [
-    r"^\s*\$\s*$", r"Bash\s*\(\s*sleep", r"^\s*sleep\s+\d+",
-    r"^Tip:", r"^💡\s*Tip", r"^\s*╭─+╮\s*$", r"^\s*│.*Tip.*│\s*$",
-    r"^\s*╰─+╯\s*$", r"^Waiting for input\.\.\.", r"^>\s*$",
-    r"find tasks.*work on them", r"You may also receive TASK:",
-    r"polling loop", r"resume polling", r"Run TaskList.*find tasks",
-]]
-AGENT_MSG_RE = [re.compile(p, re.IGNORECASE) for p in [
-    r"TASK\s*(\[|:)", r"BUG\s*:", r"COMPLETE\s*:", r"send-to-agent\.sh",
-    r"Done-\w+", r"DONE-\w+", r"REVIEW-REQUEST", r"REVIEW-APPROVED", r"REVIEW-REJECTED",
-]]
-TEST_FAIL_RE = [re.compile(p, re.IGNORECASE) for p in [
-    r"FAILED", r"FAIL[:\s]", r"Error:.*test", r"Assert.*Error",
-    r"\d+ failed", r"ERRORS?!", r"test.*failed",
-]]
-ACCEPT_RE = re.compile(r"(allow|accept)\s*(edit|once|always)", re.IGNORECASE)
-WAIT_RE = [re.compile(p, re.IGNORECASE) for p in [
-    r"No tasks?\.\s*Will check", r"Polling for work", r"no.*pending.*task",
-    r"NO_TASKS", r"Run TaskList", r"Session ended\. Restarting",
-    r"sleep\s+\d+.*then.*check", r"TaskList.*no.*tasks",
-]]
-
-def skip(l): return any(p.search(l) for p in SKIP_RE)
-def agent_msg(l): return any(p.search(l) for p in AGENT_MSG_RE)
-def test_fail(l): return any(p.search(l) for p in TEST_FAIL_RE)
-def accept_edit(l): return bool(ACCEPT_RE.search(l))
-def waiting(l): return any(p.search(l) for p in WAIT_RE)
-
-def notify(t, m):
-    try: subprocess.Popen(["osascript", "-e", f'display notification "{m}" with title "{t}" sound name "Glass"'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except: pass
-
-async def main(conn):
-    app = await iterm2.async_get_app(conn)
-    sessions = {}
-    for w in app.windows:
-        for t in w.tabs:
-            for s in t.sessions:
-                n = await s.async_get_variable("name")
-                if not n: continue
-                nl = n.lower()
-                for a in AGENTS:
-                    if a in nl and a not in sessions: sessions[a] = s; break
-    if not sessions: print("No sessions found. Retrying..."); await asyncio.sleep(5); return
-    print(f"Logging {len(sessions)} sessions")
-    lf = {a: open(os.path.join(LOG_DIR, f"{a}.log"), "a", buffering=1) for a in sessions}
-    prev = {a: "" for a in sessions}; ws = {}; ln = {}
-    while True:
-        for a, s in sessions.items():
-            try:
-                c = await s.async_get_screen_contents()
-                lines = [c.line(i).string.rstrip() for i in range(c.number_of_lines)]
-                cur = "\n".join(lines)
-                if cur != prev[a]:
-                    pl = prev[a].split("\n") if prev[a] else []
-                    nl = lines[len(pl):] if len(lines) > len(pl) else lines
-                    nl = [l for l in nl if l.strip()]
-                    if not nl: prev[a] = cur; continue
-                    co, lb, now = COLORS.get(a,""), LABELS.get(a,a.upper()), time.time()
-                    for l in nl:
-                        if skip(l): continue
-                        if waiting(l):
-                            if a not in ws: ws[a] = now
-                            print(f"\r{co}[{lb}]{RESET} ⏳ Waiting ({int(now-ws[a])}s)...", end="", flush=True); continue
-                        elif a in ws:
-                            print(f"\r{co}[{lb}]{RESET} ⏳ Done waiting ({int(now-ws[a])}s)", flush=True)
-                            lf[a].write(f"⏳ Waited ({int(now-ws[a])}s)\n"); del ws[a]
-                        if accept_edit(l): lf[a].write("✏️ Edit accepted\n"); print(f"{co}[{lb}]{RESET} ✏️ Edit accepted", flush=True); continue
-                        if agent_msg(l):
-                            lf[a].write(f"📨 {l}\n"); print(f"{BOLD}{co}[{lb}]{RESET} {BOLD}📨 {l}{RESET}", flush=True)
-                            if now - ln.get(a,0) > 10: notify(f"🤖 {lb}", l[:120]); ln[a] = now
+    
+    # Build agent list for Python logger
+    AGENT_PY_LIST=""
+    AGENT_PY_COLORS=""
+    AGENT_PY_LABELS=""
+    COLOR_CODES=("35" "34" "32" "33" "31" "36" "37" "91" "92" "93")
+    SHORT_LABELS=("PM" "ARCH" "BACK" "FRONT" "QA" "DEV" "OPS" "SEC" "DOC" "INF")
+    idx=0
+    for agent in "${AGENTS[@]}"; do
+        label=${SHORT_LABELS[$idx]:-$(echo "$agent" | tr '[:lower:]' '[:upper:]' | cut -c1-4)}
+        color=${COLOR_CODES[$idx]:-37}
+        AGENT_PY_LIST+="\"${agent}\", "
+        AGENT_PY_COLORS+="    \"${agent}\": \"\\033[${color}m\",\n"
+        AGENT_PY_LABELS+="    \"${agent}\": \"${label}\",\n"
+        ((idx++))
+    done
+    
+    cat > "$PROMPT_DIR/screen-logger.py" << PYLOGGER
+    #!/usr/bin/env python3
+    """
+    Polls iTerm2 session screen contents every 2 seconds and writes
+    filtered, formatted lines to per-agent log files. Filters out noise
+    (bash/sleep, tips), emphasizes inter-agent messages and test failures,
+    collapses polling waits, and sends iTerm2 notifications.
+    """
+    import iterm2
+    import asyncio
+    import os
+    import re
+    import subprocess
+    import time
+    
+    LOG_DIR = "${LOG_DIR}"
+    POLL_INTERVAL = 2
+    
+    AGENTS = [${AGENT_PY_LIST}]
+    
+    COLORS = {
+    $(printf '%b' "$AGENT_PY_COLORS")}
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+    LABELS = {
+    $(printf '%b' "$AGENT_PY_LABELS")}
+    
+    # ── Filtering patterns ──
+    SKIP_PATTERNS = [
+        r"^\s*\$\s*$",
+        r"Bash\s*\(\s*sleep",
+        r"^\s*sleep\s+\d+",
+        r"^Tip:",
+        r"^💡\s*Tip",
+        r"^\s*╭─+╮\s*$",
+        r"^\s*│.*Tip.*│\s*$",
+        r"^\s*╰─+╯\s*$",
+        r"^Waiting for input\.\.\.",
+        r"^>\s*$",
+        r"find tasks.*work on them",
+        r"You may also receive TASK:",
+        r"polling loop",
+        r"resume polling",
+        r"Run TaskList.*find tasks",
+    ]
+    SKIP_RE = [re.compile(p, re.IGNORECASE) for p in SKIP_PATTERNS]
+    
+    AGENT_MSG_PATTERNS = [
+        re.compile(r"TASK\s*(\[|:)", re.IGNORECASE),
+        re.compile(r"BUG\s*:", re.IGNORECASE),
+        re.compile(r"COMPLETE\s*:", re.IGNORECASE),
+        re.compile(r"send-to-agent\.sh", re.IGNORECASE),
+        re.compile(r"Done-\w+", re.IGNORECASE),
+        re.compile(r"DONE-\w+", re.IGNORECASE),
+        re.compile(r"REVIEW-REQUEST", re.IGNORECASE),
+        re.compile(r"REVIEW-APPROVED", re.IGNORECASE),
+        re.compile(r"REVIEW-REJECTED", re.IGNORECASE),
+    ]
+    
+    TEST_FAIL_PATTERNS = [
+        re.compile(r"FAILED", re.IGNORECASE),
+        re.compile(r"FAIL[:\s]", re.IGNORECASE),
+        re.compile(r"Error:.*test", re.IGNORECASE),
+        re.compile(r"AssertionError", re.IGNORECASE),
+        re.compile(r"\d+ failed", re.IGNORECASE),
+        re.compile(r"ERRORS?!", re.IGNORECASE),
+        re.compile(r"test.*failed", re.IGNORECASE),
+    ]
+    
+    ACCEPT_EDIT_RE = re.compile(r"(allow|accept)\s*(edit|once|always)", re.IGNORECASE)
+    
+    WAITING_PATTERNS = [
+        re.compile(r"No tasks?\.\s*Will check", re.IGNORECASE),
+        re.compile(r"Polling for work", re.IGNORECASE),
+        re.compile(r"no.*pending.*task", re.IGNORECASE),
+        re.compile(r"NO_TASKS", re.IGNORECASE),
+        re.compile(r"Run TaskList", re.IGNORECASE),
+        re.compile(r"Session ended\. Restarting", re.IGNORECASE),
+        re.compile(r"sleep\s+\d+.*then.*check", re.IGNORECASE),
+        re.compile(r"TaskList.*no.*tasks", re.IGNORECASE),
+    ]
+    
+    def should_skip(line): return any(p.search(line) for p in SKIP_RE)
+    def is_agent_message(line): return any(p.search(line) for p in AGENT_MSG_PATTERNS)
+    def is_test_failure(line): return any(p.search(line) for p in TEST_FAIL_PATTERNS)
+    def is_accept_edit(line): return bool(ACCEPT_EDIT_RE.search(line))
+    def is_waiting(line): return any(p.search(line) for p in WAITING_PATTERNS)
+    
+    def send_notification(title, message):
+        try:
+            subprocess.Popen(
+                ["osascript", "-e",
+                 f'display notification "{message}" with title "{title}" sound name "Glass"'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    
+    async def main(connection):
+        app = await iterm2.async_get_app(connection)
+        sessions = {}
+        for window in app.windows:
+            for tab in window.tabs:
+                for session in tab.sessions:
+                    name = await session.async_get_variable("name")
+                    if name is None: continue
+                    name_lower = name.lower()
+                    for agent in AGENTS:
+                        if agent in name_lower and agent not in sessions:
+                            sessions[agent] = session
+                            break
+    
+        if not sessions:
+            print("No agent sessions found. Retrying in 5s...")
+            await asyncio.sleep(5)
+            return
+    
+        print(f"Logging {len(sessions)} sessions (polling every {POLL_INTERVAL}s)")
+        print()
+    
+        log_files = {}
+        for agent in sessions:
+            log_files[agent] = open(os.path.join(LOG_DIR, f"{agent}.log"), "a", buffering=1)
+    
+        prev_contents = {agent: "" for agent in sessions}
+        waiting_since = {}
+        last_notif = {}
+    
+        while True:
+            for agent, session in sessions.items():
+                try:
+                    contents = await session.async_get_screen_contents()
+                    lines = []
+                    for i in range(contents.number_of_lines):
+                        lines.append(contents.line(i).string.rstrip())
+                    current = "\n".join(lines)
+                    if current != prev_contents[agent]:
+                        prev_lines = prev_contents[agent].split("\n") if prev_contents[agent] else []
+                        new_lines = lines[len(prev_lines):] if len(lines) > len(prev_lines) else lines
+                        new_lines = [l for l in new_lines if l.strip()]
+                        if not new_lines:
+                            prev_contents[agent] = current
                             continue
-                        if test_fail(l):
-                            lf[a].write(f"❌ {l}\n"); print(f"{BOLD}{co}[{lb}]{RESET} {BOLD}❌ {l}{RESET}", flush=True)
-                            if now - ln.get(f"{a}_f",0) > 10: notify(f"❌ {lb}", l[:120]); ln[f"{a}_f"] = now
-                            continue
-                        lf[a].write(l+"\n"); print(f"{co}[{lb}]{RESET} {l}", flush=True)
-                    prev[a] = cur
-            except: pass
-        await asyncio.sleep(POLL_INTERVAL)
-
-iterm2.run_until_complete(main)
+                        color = COLORS.get(agent, "")
+                        label = LABELS.get(agent, agent.upper())
+                        now = time.time()
+                        for line in new_lines:
+                            if should_skip(line): continue
+                            if is_waiting(line):
+                                if agent not in waiting_since: waiting_since[agent] = now
+                                elapsed = int(now - waiting_since[agent])
+                                print(f"\r{color}[{label}]{RESET} ⏳ Waiting for tasks ({elapsed}s)...", end="", flush=True)
+                                continue
+                            else:
+                                if agent in waiting_since:
+                                    elapsed = int(now - waiting_since[agent])
+                                    print(f"\r{color}[{label}]{RESET} ⏳ Done waiting ({elapsed}s)", flush=True)
+                                    log_files[agent].write(f"⏳ Waited for tasks ({elapsed}s)\n")
+                                    del waiting_since[agent]
+                            if is_accept_edit(line):
+                                log_files[agent].write("✏️  User accepted edit\n")
+                                print(f"{color}[{label}]{RESET} ✏️  User accepted edit", flush=True)
+                                continue
+                            if is_agent_message(line):
+                                log_files[agent].write(f"📨 {line}\n")
+                                print(f"{BOLD}{color}[{label}]{RESET} {BOLD}📨 {line}{RESET}", flush=True)
+                                if now - last_notif.get(agent, 0) > 10:
+                                    send_notification(f"🤖 {label}", line[:120])
+                                    last_notif[agent] = now
+                                continue
+                            if is_test_failure(line):
+                                log_files[agent].write(f"❌ {line}\n")
+                                print(f"{BOLD}{color}[{label}]{RESET} {BOLD}❌ {line}{RESET}", flush=True)
+                                if now - last_notif.get(f"{agent}_fail", 0) > 10:
+                                    send_notification(f"❌ Test Failed — {label}", line[:120])
+                                    last_notif[f"{agent}_fail"] = now
+                                continue
+                            log_files[agent].write(line + "\n")
+                            print(f"{color}[{label}]{RESET} {line}", flush=True)
+                        prev_contents[agent] = current
+                except Exception:
+                    pass
+            await asyncio.sleep(POLL_INTERVAL)
+    
+    iterm2.run_until_complete(main)
 PYLOGGER
-        chmod +x "$PROMPT_DIR/screen-logger.py"
-
-        cat > "$PROMPT_DIR/run-logs.sh" << LOGSCRIPT
-#!/bin/bash
-echo "╔══════════════════════════════════════╗"
-echo "║       📝 TEAM LOGS (filtered)        ║"
-echo "║  📨 agent msgs  ❌ test fails        ║"
-echo "║  ✏️  edits  ⏳ waiting                ║"
-echo "╚══════════════════════════════════════╝"
-echo ""
-sleep 5
-exec python3 '${PROMPT_DIR}/screen-logger.py'
+    chmod +x "$PROMPT_DIR/screen-logger.py"
+    
+    # LOGS pane launcher
+    cat > "$PROMPT_DIR/run-logs.sh" << LOGSCRIPT
+    #!/bin/bash
+    echo "╔══════════════════════════════════════╗"
+    echo "║       📝 TEAM LOGS (filtered)        ║"
+    echo "║  📨 agent msgs  ❌ test fails        ║"
+    echo "║  ✏️  edits  ⏳ waiting                ║"
+    echo "╠══════════════════════════════════════╣"
+    $(idx=0; for agent in "${AGENTS[@]}"; do
+        label=${SHORT_LABELS[$idx]:-$(echo "$agent" | tr '[:lower:]' '[:upper:]' | cut -c1-4)}
+        echo "echo \"║  ${label} \"";
+        ((idx++));
+    done)
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+    echo "Waiting for agent sessions to start..."
+    sleep 5
+    exec python3 '${PROMPT_DIR}/screen-logger.py'
 LOGSCRIPT
-        chmod +x "$PROMPT_DIR/run-logs.sh"
-    fi
-
-    # ── Launch Info ──
-
+    chmod +x "$PROMPT_DIR/run-logs.sh"
+    
+    fi  # end DEBUG_MODE scripts
+    
+    # ==================== Launch Info ====================
+    
     echo "=========================================="
     echo "  Launching Agent Team in iTerm2"
     [ "$TEST_MODE" = true ] && echo "  MODE: TEST (mock issue, no ticket source)"
@@ -779,34 +850,44 @@ LOGSCRIPT
     [ "$DEBUG_MODE" = true ] && echo "  DEBUG: Logging enabled → ${LOG_DIR}"
     echo "=========================================="
     echo ""
-
-    # ── Dynamic iTerm2 Layout ──
-
-    local NUM_WORKERS=${#WORKER_AGENTS[@]}
-
+    
+    # ==================== AppleScript: Dynamic Layout ====================
+    
+    NUM_WORKERS=${#WORKER_AGENTS[@]}
+    ROWS=$(( (NUM_WORKERS + 1) / 2 ))
+    
+    # Build the AppleScript dynamically
     build_applescript() {
         local as=""
         as+='tell application "iTerm2"\n'
         as+='    activate\n'
         as+='    set newWindow to (create window with default profile)\n'
         as+='    tell newWindow\n'
-
+    
+        # Interactive agent (left, full height)
         local int_label
         int_label=$(echo "$INTERACTIVE_AGENT" | tr '[:lower:]' '[:upper:]')
         as+="        tell current session\n"
         as+="            set name to \"${int_label}\"\n"
         as+="            set worker0Session to (split vertically with default profile)\n"
         as+="        end tell\n"
-
+    
+        # First worker — split vertically to create column pairs
         local w0_label
         w0_label=$(echo "${WORKER_AGENTS[0]}" | tr '[:lower:]' '[:upper:]')
         as+="        tell worker0Session\n"
         as+="            set name to \"${w0_label}\"\n"
+    
         if [ "$NUM_WORKERS" -ge 2 ]; then
             as+="            set worker1Session to (split vertically with default profile)\n"
         fi
+        if [ "$DEBUG_MODE" = true ] && [ "$NUM_WORKERS" -ge 2 ]; then
+            # Need LOGS column — split from the rightmost worker
+            :
+        fi
         as+="        end tell\n"
-
+    
+        # Second worker (right column top)
         if [ "$NUM_WORKERS" -ge 2 ]; then
             local w1_label
             w1_label=$(echo "${WORKER_AGENTS[1]}" | tr '[:lower:]' '[:upper:]')
@@ -816,13 +897,15 @@ LOGSCRIPT
                 as+="            set logsSession to (split vertically with default profile)\n"
             fi
             as+="        end tell\n"
+    
             if [ "$DEBUG_MODE" = true ]; then
                 as+="        tell logsSession\n"
                 as+="            set name to \"LOGS\"\n"
                 as+="        end tell\n"
             fi
         fi
-
+    
+        # Split first worker horizontally for 3rd worker (bottom-left of grid)
         if [ "$NUM_WORKERS" -ge 3 ]; then
             local w2_label
             w2_label=$(echo "${WORKER_AGENTS[2]}" | tr '[:lower:]' '[:upper:]')
@@ -833,7 +916,8 @@ LOGSCRIPT
             as+="            set name to \"${w2_label}\"\n"
             as+="        end tell\n"
         fi
-
+    
+        # Split second worker horizontally for 4th worker (bottom-right of grid)
         if [ "$NUM_WORKERS" -ge 4 ]; then
             local w3_label
             w3_label=$(echo "${WORKER_AGENTS[3]}" | tr '[:lower:]' '[:upper:]')
@@ -844,7 +928,8 @@ LOGSCRIPT
             as+="            set name to \"${w3_label}\"\n"
             as+="        end tell\n"
         fi
-
+    
+        # Workers 5+ — split from previous row
         local widx=4
         while [ $widx -lt "$NUM_WORKERS" ]; do
             local wn_label prev_idx
@@ -858,33 +943,43 @@ LOGSCRIPT
             as+="        end tell\n"
             ((widx++))
         done
-
+    
+        # Launch scripts in each pane
         as+="\n        -- Launch agents\n"
         as+="        tell current session\n"
         as+="            write text \"'${PROMPT_DIR}/run-${INTERACTIVE_AGENT}.sh'\"\n"
         as+="        end tell\n"
-
+    
         for i in "${!WORKER_AGENTS[@]}"; do
             local w="${WORKER_AGENTS[$i]}"
-            as+="        tell worker${i}Session\n"
+            if [ "$i" = "0" ]; then
+                as+="        tell worker0Session\n"
+            elif [ "$i" = "1" ]; then
+                as+="        tell worker1Session\n"
+            else
+                as+="        tell worker${i}Session\n"
+            fi
             as+="            write text \"'${PROMPT_DIR}/run-${w}.sh'\"\n"
             as+="        end tell\n"
         done
-
+    
         if [ "$DEBUG_MODE" = true ] && [ "$NUM_WORKERS" -ge 2 ]; then
             as+="        tell logsSession\n"
             as+="            write text \"'${PROMPT_DIR}/run-logs.sh'\"\n"
             as+="        end tell\n"
         fi
-
+    
         as+="    end tell\n"
         as+='    set bounds of newWindow to {0, 0, 9999, 9999}\n'
         as+="end tell\n"
+    
         printf '%b' "$as"
     }
-
+    
     osascript <<< "$(build_applescript)"
-
+    
+    # ==================== Post-launch Info ====================
+    
     echo ""
     echo "Team launched! (${#AGENTS[@]} agents)"
     echo ""
@@ -896,7 +991,6 @@ LOGSCRIPT
     echo "  Navigation:"
     echo "    • Cmd+[ / Cmd+]     → Switch panes"
     echo "    • Cmd+Shift+Enter   → Zoom a pane"
-    echo ""
 }
 
 # ==================== Dispatch ====================
