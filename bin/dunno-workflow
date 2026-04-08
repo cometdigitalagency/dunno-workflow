@@ -32,6 +32,7 @@ show_help() {
     echo "Start options:"
     echo "  --issue, -i <num>   Ticket number to work on"
     echo "  --test, -t          Test mode — mock issue, no ticket source needed"
+    echo "  --e2e, -e           End-to-end test — small ticket through full PM→architect→workers→QA flow"
     echo "  --debug, -d         Enable LOGS pane with filtered session logging"
 }
 
@@ -407,19 +408,22 @@ cmd_start() {
     ISSUE_NUM=""
     TEST_MODE=false
     DEBUG_MODE=false
-    
+    E2E_MODE=false
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             --issue|-i) ISSUE_NUM="$2"; shift 2 ;;
             --test|-t)  TEST_MODE=true; shift ;;
+            --e2e|-e)   E2E_MODE=true; shift ;;
             --debug|-d) DEBUG_MODE=true; shift ;;
             --help|-h)
-                echo "Usage: ./run-team.sh [--issue <number>] [--test] [--debug]"
+                echo "Usage: dunno-workflow start [--issue <number>] [--test] [--e2e] [--debug]"
                 echo ""
                 echo "Options:"
                 echo "  --issue, -i <num>   Ticket number to work on"
                 echo "  --test, -t          Test mode — mock issue, no ticket source needed"
+                echo "  --e2e, -e           End-to-end test — small ticket through full flow"
                 echo "  --debug, -d         Enable LOGS pane with filtered session logging"
                 echo "  --help, -h          Show this help"
                 exit 0 ;;
@@ -554,7 +558,22 @@ cmd_start() {
     }
     
     generate_ticket_commands "$TICKET_SOURCE"
-    
+
+    # ── E2E mode: override to file-based tickets with a small test ticket ──
+    if [ "$E2E_MODE" = true ]; then
+        TICKET_SOURCE="file"
+        generate_ticket_commands "file"
+        local ticket_dir="${REPO_DIR}/tickets"
+        mkdir -p "$ticket_dir"
+        local tpl_dir
+        tpl_dir="$(get_template_dir)"
+        if [ -f "$tpl_dir/e2e-test-ticket.md" ]; then
+            cp "$tpl_dir/e2e-test-ticket.md" "$ticket_dir/e2e-test.md"
+            echo "E2E: Created test ticket in $ticket_dir/e2e-test.md"
+        fi
+        TEST_MODE=true
+    fi
+
     # ==================== Helper: send-to-agent.sh ====================
     
     cat > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
@@ -697,6 +716,24 @@ HELPER
             prompt+="\n${extra}\n"
         fi
     
+        # Stale task recovery for architect (auto_start agents)
+        local agent_auto_start
+        agent_auto_start=$(yq_get ".agents.$agent.auto_start // false")
+        if [ "$agent_auto_start" = "true" ]; then
+            prompt+="## STALE TASK RECOVERY\n"
+            prompt+="Worker agents auto-send DONE messages when their session ends. However, if you\n"
+            prompt+="have been waiting for DONE messages for more than 2 minutes, ping each dispatched\n"
+            prompt+="worker to check their status:\n"
+            for other in "${AGENTS[@]}"; do
+                if [ "$other" != "$agent" ] && [ "$(yq_get ".agents.$other.interactive")" != "true" ] && [ "$(yq_get ".agents.$other.auto_start // false")" != "true" ]; then
+                    local other_upper
+                    other_upper=$(echo "$other" | tr '[:lower:]' '[:upper:]')
+                    prompt+="  ${PROMPT_DIR}/send-to-agent.sh ${other_upper} 'STATUS: Are you done? Reply DONE-${other} if finished.'\n"
+                fi
+            done
+            prompt+="\n"
+        fi
+
         # Important rules for event-driven agents
         if [ "$interactive" != "true" ]; then
             prompt+="## IMPORTANT\n"
@@ -786,8 +823,18 @@ HELPER
         interactive=$(yq_get ".agents.$agent.interactive")
         local label
         label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-        local allowed_tools
+        local allowed_tools auto_start_agent
         allowed_tools=$(get_allowed_tools "$agent")
+        # Find the auto_start agent (architect) for DONE callbacks
+        auto_start_agent=""
+        auto_start_label=""
+        for _a in "${AGENTS[@]}"; do
+            if [ "$(yq_get ".agents.$_a.auto_start // false")" = "true" ]; then
+                auto_start_agent="$_a"
+                auto_start_label=$(echo "$_a" | tr '[:lower:]' '[:upper:]')
+                break
+            fi
+        done
     
         if [ "$interactive" = "true" ]; then
             # Interactive agent (PM) — single session, no restart loop
@@ -866,6 +913,9 @@ LAUNCHER
                 # Pipe from file to avoid CLI argument length limits on long messages
                 cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
                 echo ""
+                # Auto-notify: guarantee DONE reaches architect even if claude -p didn't call send-to-agent.sh
+                '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
+                echo "--- [\$(date '+%H:%M:%S')] Auto-sent DONE-${agent} to ${auto_start_agent} ---"
                 echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
                 echo ""
             fi
