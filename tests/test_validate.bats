@@ -209,9 +209,14 @@ load test_helper
     [[ "$output" == *"──►"* ]]
 }
 
-@test "validate: --validate flag works as command" {
-    use_fixture "dunno-agents.yaml"
-    run run_in_dir "$TEST_WORK_DIR" --validate
+@test "validate: --version flag works" {
+    run "$DUNNO_WORKFLOW" --version
     [ "$status" -eq 0 ]
-    [[ "$output" == *"workflow.yaml is valid"* ]]
+    [[ "$output" == *"dunno-workflow v"* ]]
+}
+
+@test "validate: -v flag works" {
+    run "$DUNNO_WORKFLOW" -v
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"dunno-workflow v"* ]]
 }

@@ -22,9 +22,12 @@ show_help() {
     echo "  dunno-workflow init               Create workflow.yaml in current directory"
     echo "  dunno-workflow start [options]     Launch agent team in iTerm2"
     echo "  dunno-workflow validate            Validate workflow.yaml (schema + event graph)"
-    echo "  dunno-workflow --validate          Same as validate"
     echo "  dunno-workflow stop                Stop all running agent sessions"
     echo "  dunno-workflow version             Show version"
+    echo ""
+    echo "Global flags:"
+    echo "  --help, -h          Show this help"
+    echo "  --version, -v       Show version"
     echo ""
     echo "Start options:"
     echo "  --issue, -i <num>   Ticket number to work on"
@@ -1319,12 +1322,12 @@ LOGSCRIPT
 # ==================== Dispatch ====================
 
 case "${1:-}" in
-    start)      shift; cmd_start "$@" ;;
-    init)       cmd_init ;;
-    validate)   cmd_validate ;;
-    --validate) cmd_validate ;;
-    stop)       cmd_stop ;;
-    version)    cmd_version ;;
+    start)          shift; cmd_start "$@" ;;
+    init)           cmd_init ;;
+    validate)       cmd_validate ;;
+    stop)           cmd_stop ;;
+    version)        cmd_version ;;
+    --version|-v)   cmd_version ;;
     --help|-h|help|"") show_help ;;
     *) echo "Unknown command: $1"; show_help; exit 1 ;;
 esac
