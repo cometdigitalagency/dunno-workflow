@@ -1,0 +1,13 @@
+project:
+  name: bad-colon-test
+  repo: test/repo
+
+tickets:
+  source: file
+
+agents:
+  lead:
+    role: Lead
+    interactive: true
+    description: value: with: extra: colons: unquoted
+    workflow: [missing bracket

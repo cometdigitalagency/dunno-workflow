@@ -97,3 +97,121 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" == *"workflow.yaml not found"* ]]
 }
+
+# ── YAML syntax errors ──
+
+@test "validate: rejects bad indentation" {
+    use_fixture "syntax-bad-indent.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"syntax errors"* ]]
+}
+
+@test "validate: rejects malformed YAML" {
+    use_fixture "syntax-duplicate-key.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"syntax errors"* ]]
+}
+
+@test "validate: rejects unclosed quotes" {
+    use_fixture "syntax-unclosed-quote.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"syntax errors"* ]]
+}
+
+@test "validate: rejects tab indentation" {
+    use_fixture "syntax-tab-indent.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"syntax errors"* ]]
+}
+
+# ── Graph validation: errors ──
+
+@test "validate: detects missing event definition" {
+    use_fixture "graph-missing-event.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not defined in events"* ]]
+}
+
+@test "validate: detects dead agent (receives event nobody sends)" {
+    use_fixture "graph-dead-agent.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"dead agent"* ]]
+}
+
+@test "validate: detects direction inconsistency" {
+    use_fixture "graph-bad-direction.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"disagrees"* ]]
+}
+
+@test "validate: detects unreachable agent" {
+    use_fixture "graph-unreachable.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unreachable"* ]]
+}
+
+@test "validate: detects self-loop" {
+    use_fixture "graph-self-loop.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"self-loop"* ]]
+}
+
+# ── Graph validation: warnings (exit 0) ──
+
+@test "validate: warns on orphaned event but passes" {
+    use_fixture "graph-orphaned-event.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING"* ]]
+    [[ "$output" == *"no agent references"* ]]
+}
+
+@test "validate: warns on unused send but passes" {
+    use_fixture "graph-unused-send.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING"* ]]
+    [[ "$output" == *"no other agent receives"* ]]
+}
+
+@test "validate: warns on event loop cycle" {
+    use_fixture "graph-event-loop.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    # Has self-loop errors too (alpha and beta both send+receive ping)
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"self-loop"* ]]
+}
+
+# ── Graph validation: clean pass ──
+
+@test "validate: dunno-agents passes all graph checks" {
+    use_fixture "dunno-agents.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Event Flow:"* ]]
+    [[ "$output" != *"ERROR"* ]]
+}
+
+@test "validate: shows event flow rendering with arrows" {
+    use_fixture "dunno-agents.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"task:"* ]]
+    [[ "$output" == *"──►"* ]]
+}
+
+@test "validate: --validate flag works as command" {
+    use_fixture "dunno-agents.yaml"
+    run run_in_dir "$TEST_WORK_DIR" --validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"workflow.yaml is valid"* ]]
+}

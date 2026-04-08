@@ -1,0 +1,11 @@
+project:
+  name: "unclosed quote test
+  repo: test/repo
+
+tickets:
+  source: file
+
+agents:
+  lead:
+    role: Lead
+    interactive: true

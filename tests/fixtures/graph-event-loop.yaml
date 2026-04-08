@@ -1,0 +1,51 @@
+project:
+  name: event-loop-test
+  repo: test/repo
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+
+events:
+  ping:
+    description: Ping message
+    format: "PING"
+    direction: alpha -> beta
+
+agents:
+  alpha:
+    role: Alpha
+    description: First agent
+    interactive: true
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: [] }
+    stack: []
+    sends: [ping]
+    receives: [ping]
+    workflow: ["Send and receive pings"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+
+  beta:
+    role: Beta
+    description: Second agent
+    interactive: false
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: [] }
+    stack: []
+    sends: [ping]
+    receives: [ping]
+    workflow: ["Echo pings"]
+    rules: []
+    init:
+      default: "Waiting."
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

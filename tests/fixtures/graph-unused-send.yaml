@@ -1,0 +1,54 @@
+project:
+  name: unused-send-test
+  repo: test/repo
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+
+events:
+  task:
+    description: Work assignment nobody listens to
+    format: "TASK: {description}"
+  notify:
+    description: Notification that worker receives
+    format: "NOTIFY"
+    direction: lead -> worker
+
+agents:
+  lead:
+    role: Lead
+    description: Interactive lead
+    interactive: true
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: [] }
+    stack: []
+    sends: [task, notify]
+    receives: []
+    workflow: ["Take input"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+
+  worker:
+    role: Worker
+    description: Does work
+    interactive: false
+    model: sonnet
+    tools: [read, edit, bash]
+    owns: { paths: ["src/**"], never_edit: [] }
+    stack: []
+    sends: []
+    receives: [notify]
+    workflow: ["Do work"]
+    rules: []
+    init:
+      default: "Waiting."
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

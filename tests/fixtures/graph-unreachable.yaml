@@ -1,0 +1,67 @@
+project:
+  name: unreachable-test
+  repo: test/repo
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+
+events:
+  task:
+    description: Work assignment
+    format: "TASK: {description}"
+    direction: lead -> worker
+
+agents:
+  lead:
+    role: Lead
+    description: Interactive lead
+    interactive: true
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: [] }
+    stack: []
+    sends: [task]
+    receives: []
+    workflow: ["Take input"]
+    rules: []
+    init:
+      default: "Ready."
+    prompt_extra: ""
+
+  worker:
+    role: Worker
+    description: Does work
+    interactive: false
+    model: sonnet
+    tools: [read, edit, bash]
+    owns: { paths: ["src/**"], never_edit: [] }
+    stack: []
+    sends: []
+    receives: [task]
+    workflow: ["Do work"]
+    rules: []
+    init:
+      default: "Waiting."
+    prompt_extra: ""
+
+  isolated:
+    role: Isolated Agent
+    description: No event connections
+    interactive: false
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: [] }
+    stack: []
+    sends: []
+    receives: []
+    workflow: ["Wait forever"]
+    rules: []
+    init:
+      default: "Waiting."
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

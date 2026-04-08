@@ -1,0 +1,14 @@
+project:
+  name: bad-indent-test
+  repo: test/repo
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+
+agents:
+  lead:
+    role: Lead
+      description: This line is indented wrong
+    interactive: true
