@@ -1,0 +1,4 @@
+--- [10:00:00] Received message (500 bytes) ---
+TASK [Ticket #5]: Edit config
+Tool permission denied: Edit not allowed
+Session ended. Waiting for next message

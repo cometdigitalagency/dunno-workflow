@@ -1,0 +1,6 @@
+--- [10:00:00] Received message (500 bytes) ---
+TASK [Ticket #4]: Fix service
+Traceback (most recent call last):
+  File "service.py", line 42
+TypeError: expected str, got NoneType
+Session ended. Waiting for next message

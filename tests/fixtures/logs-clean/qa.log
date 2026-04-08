@@ -1,0 +1,5 @@
+--- [10:02:00] Received message (300 bytes) ---
+TASK [Ticket #1]: Write tests
+All tests pass.
+DONE-qa
+--- [10:03:00] Auto-sent DONE-qa to architect ---
