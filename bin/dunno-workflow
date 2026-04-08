@@ -576,7 +576,7 @@ cmd_start() {
 
     # ==================== Helper: send-to-agent.sh ====================
     
-    cat > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
+    sed 's/^    //' > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
     #!/bin/bash
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     AGENT_NAME=$(echo "$1" | tr '[:upper:]' '[:lower:]')
@@ -861,7 +861,7 @@ HELPER
     
             if [ "$starts_immediately" = "true" ]; then
                 # Architect — starts immediately, restarts if session ends
-                cat > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
+                sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
     cd '${REPO_DIR}'
     printf '\033]0;${label}\007'
@@ -883,7 +883,7 @@ HELPER
 LAUNCHER
             else
                 # Worker agent — waits for a trigger file, then starts Claude with its contents
-                cat > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
+                sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
     cd '${REPO_DIR}'
     printf '\033]0;${label}\007'
@@ -1007,7 +1007,7 @@ ENDSCRIPT
         ((idx++))
     done
     
-    cat > "$PROMPT_DIR/screen-logger.py" << PYLOGGER
+    sed 's/^    //' > "$PROMPT_DIR/screen-logger.py" << PYLOGGER
     #!/usr/bin/env python3
     """
     Polls iTerm2 session screen contents every 2 seconds and writes
@@ -1195,7 +1195,7 @@ PYLOGGER
     chmod +x "$PROMPT_DIR/screen-logger.py"
     
     # LOGS pane launcher
-    cat > "$PROMPT_DIR/run-logs.sh" << LOGSCRIPT
+    sed 's/^    //' > "$PROMPT_DIR/run-logs.sh" << LOGSCRIPT
     #!/bin/bash
     echo "╔══════════════════════════════════════╗"
     echo "║       📝 TEAM LOGS (filtered)        ║"
