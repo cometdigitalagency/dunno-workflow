@@ -11,7 +11,7 @@
 
 set -e
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 
 # ==================== Commands ====================
 
@@ -525,25 +525,77 @@ analyze_missing_complete() {
     fi
 }
 
+_gh_api() {
+    local method="$1" endpoint="$2" data="$3"
+    local token="${GITHUB_TOKEN:-${DUNNO_GITHUB_TOKEN:-}}"
+    if [ -z "$token" ]; then
+        echo "ERROR: GITHUB_TOKEN or DUNNO_GITHUB_TOKEN env var required for issue creation." >&2
+        echo "  Generate a token at https://github.com/settings/tokens (needs 'repo' scope)" >&2
+        echo "  Then: export GITHUB_TOKEN=ghp_..." >&2
+        return 1
+    fi
+    if [ -n "$data" ]; then
+        curl -sf -X "$method" \
+            -H "Authorization: token $token" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "$data" \
+            "https://api.github.com${endpoint}" 2>/dev/null
+    else
+        curl -sf -X "$method" \
+            -H "Authorization: token $token" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com${endpoint}" 2>/dev/null
+    fi
+}
+
+_ensure_labels() {
+    local repo="$1"
+    # Create labels if they don't exist (ignore errors if they already exist)
+    _gh_api POST "/repos/${repo}/labels" '{"name":"auto-detected","color":"D93F0B","description":"Auto-detected by dunno-workflow analyze"}' >/dev/null 2>&1 || true
+    _gh_api POST "/repos/${repo}/labels" '{"name":"bug","color":"D73A4A","description":"Something isn'"'"'t working"}' >/dev/null 2>&1 || true
+}
+
 _create_issue() {
     local title="$1" body="$2" dry_run="$3"
     if [ "$dry_run" = true ]; then
         echo "  [DRY RUN] Would create: \"Bug: ${title}\""
         return 0
     fi
+
+    local token="${GITHUB_TOKEN:-${DUNNO_GITHUB_TOKEN:-}}"
+    if [ -z "$token" ]; then
+        echo "  ⚠️  Skipped: no GITHUB_TOKEN set (export GITHUB_TOKEN=ghp_...)"
+        return 0
+    fi
+
+    # Ensure labels exist
+    _ensure_labels "$ANALYZE_REPORT_REPO"
+
     # Dedup: check if matching issue already exists
     local existing
-    existing=$(gh issue list --repo "$ANALYZE_REPORT_REPO" --label "auto-detected" --state open --json title --jq ".[].title" 2>/dev/null || true)
-    if echo "$existing" | grep -qF "$title"; then
+    existing=$(_gh_api GET "/repos/${ANALYZE_REPORT_REPO}/issues?labels=auto-detected&state=open&per_page=100" "" || true)
+    if echo "$existing" | grep -qF "$title" 2>/dev/null; then
         echo "  ⏭  Skipped (duplicate): \"${title}\""
         return 0
     fi
-    local url
-    url=$(gh issue create --repo "$ANALYZE_REPORT_REPO" \
-        --title "Bug: ${title}" \
-        --label "bug,auto-detected" \
-        --body "$body" 2>/dev/null) || { echo "  ⚠️  Failed to create issue"; return 1; }
-    echo "  Created: ${url}"
+
+    # Escape body for JSON
+    local json_body
+    json_body=$(printf '%s' "$body" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$body")
+    local json_title
+    json_title=$(printf '%s' "Bug: ${title}" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "Bug: ${title}")
+
+    local response
+    response=$(_gh_api POST "/repos/${ANALYZE_REPORT_REPO}/issues" \
+        "{\"title\":${json_title},\"body\":${json_body},\"labels\":[\"bug\",\"auto-detected\"]}") || {
+        echo "  ⚠️  Failed to create issue (check GITHUB_TOKEN permissions)"
+        return 1
+    }
+
+    local issue_url
+    issue_url=$(echo "$response" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["html_url"])' 2>/dev/null || echo "(created)")
+    echo "  Created: ${issue_url}"
 }
 
 cmd_analyze() {
