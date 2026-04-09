@@ -943,12 +943,40 @@ cmd_start() {
             ;;
     esac
 
-    # Show a brief notice in the iTerm2 pane (NOT the full message — long messages
-    # get truncated by AppleScript and interfere with the worker's polling loop).
-    # The worker reads the full message from the trigger file.
+    # Deliver message to the iTerm2 pane.
+    # Worker agents (event-driven) read from .trigger files — they only need a nudge.
+    # Interactive/auto_start agents (PM, architect) receive messages via iTerm2 text
+    # input, so we must type the full message into their pane.
+    #
+    # Long messages (>3KB) are written to a temp file and piped via 'cat' to avoid
+    # AppleScript's ~4KB string truncation limit.
     AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
-    PREVIEW="${MESSAGE:0:120}"
-    [ ${#MESSAGE} -gt 120 ] && PREVIEW="${PREVIEW}..."
+
+    # Check if target is a worker (has a polling loop) by looking for a launcher
+    # that contains the trigger-file polling pattern
+    LAUNCHER="$SCRIPT_DIR/run-${AGENT_NAME}.sh"
+    if [ -f "$LAUNCHER" ] && grep -q "TRIGGER_FILE=" "$LAUNCHER" 2>/dev/null; then
+        IS_WORKER=true
+    else
+        IS_WORKER=false
+    fi
+
+    if [ "$IS_WORKER" = true ]; then
+        # Worker agent: trigger file is the primary mechanism, just nudge the pane
+        PANE_TEXT=""
+    else
+        # Interactive/auto_start agent: type the full message into the pane
+        if [ ${#MESSAGE} -gt 3000 ]; then
+            # Long message: write to temp file, type a cat command into the pane
+            MSG_FILE="$TRIGGER_DIR/${AGENT_NAME}.msg-input"
+            printf '%s\n' "$MESSAGE" > "$MSG_FILE"
+            PANE_TEXT="cat '${MSG_FILE}' | claude -p --append-system-prompt \"\$SYSTEM_PROMPT\" --allowedTools \"\$ALLOWED_TOOLS\" -n \"${AGENT_NAME}\""
+            # Actually, for interactive sessions we just need to type the message
+            PANE_TEXT="$MESSAGE"
+        else
+            PANE_TEXT="$MESSAGE"
+        fi
+    fi
 
     RESULT=$(osascript << EOF 2>&1 || true
     tell application "iTerm2"
@@ -958,7 +986,7 @@ cmd_start() {
                     set sessionName to name of s
                     if sessionName contains "$AGENT_NAME" then
                         tell s
-                            write text ""
+                            write text "$PANE_TEXT"
                         end tell
                         return "sent"
                     end if
@@ -973,19 +1001,24 @@ EOF
         echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
     fi
 
-    # Wait for receiver to ACK (max 30s)
-    ACK_FILE="$TRIGGER_DIR/${AGENT_NAME}.ack"
-    WAIT=0
-    while [ ! -f "$ACK_FILE" ] && [ $WAIT -lt 30 ]; do
-        sleep 1
-        WAIT=$((WAIT + 1))
-    done
+    # Wait for receiver to ACK (max 30s) — only for workers with polling loops.
+    # Interactive/auto_start agents don't write ACK files.
+    if [ "$IS_WORKER" = true ]; then
+        ACK_FILE="$TRIGGER_DIR/${AGENT_NAME}.ack"
+        WAIT=0
+        while [ ! -f "$ACK_FILE" ] && [ $WAIT -lt 30 ]; do
+            sleep 1
+            WAIT=$((WAIT + 1))
+        done
 
-    if [ -f "$ACK_FILE" ]; then
-        echo "--- [$(date '+%H:%M:%S')] Acknowledged by ${AGENT_NAME} (${WAIT}s) ---"
-        rm -f "$ACK_FILE"
+        if [ -f "$ACK_FILE" ]; then
+            echo "--- [$(date '+%H:%M:%S')] Acknowledged by ${AGENT_NAME} (${WAIT}s) ---"
+            rm -f "$ACK_FILE"
+        else
+            echo "WARNING: ${AGENT_NAME} did not acknowledge after 30s — trigger file may be pending" >&2
+        fi
     else
-        echo "WARNING: ${AGENT_NAME} did not acknowledge after 30s — trigger file may be pending" >&2
+        echo "--- [$(date '+%H:%M:%S')] Message typed into ${AGENT_NAME} pane ---"
     fi
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
