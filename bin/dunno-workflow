@@ -977,7 +977,8 @@ cmd_start() {
         fi
     fi
 
-    RESULT=$(osascript << EOF 2>&1 || true
+    deliver_to_pane() {
+        osascript << EOF 2>&1 || true
     tell application "iTerm2"
         repeat with w in windows
             repeat with t in tabs of w
@@ -995,14 +996,16 @@ cmd_start() {
         return "not_found"
     end tell
 EOF
-    )
-    if [ "$RESULT" = "not_found" ]; then
-        echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
-    fi
+    }
+
+    RESULT=$(deliver_to_pane)
 
     # Wait for receiver to ACK (max 30s) — only for workers with polling loops.
     # Interactive/auto_start agents don't write ACK files.
     if [ "$IS_WORKER" = true ]; then
+        if [ "$RESULT" = "not_found" ]; then
+            echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
+        fi
         ACK_FILE="$TRIGGER_DIR/${AGENT_NAME}.ack"
         WAIT=0
         while [ ! -f "$ACK_FILE" ] && [ $WAIT -lt 30 ]; do
@@ -1017,7 +1020,20 @@ EOF
             echo "WARNING: ${AGENT_NAME} did not acknowledge after 30s — trigger file may be pending" >&2
         fi
     else
-        echo "--- [$(date '+%H:%M:%S')] Message typed into ${AGENT_NAME} pane ---"
+        # Non-worker (architect/PM): retry delivery up to 3 times if pane not found
+        ATTEMPT=1
+        MAX_ATTEMPTS=3
+        while [ "$RESULT" = "not_found" ] && [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found — retry $ATTEMPT/$MAX_ATTEMPTS in 3s (trigger file persists as fallback)" >&2
+            sleep 3
+            RESULT=$(deliver_to_pane)
+        done
+        if [ "$RESULT" = "not_found" ]; then
+            echo "ERROR: iTerm2 pane for '${AGENT_NAME}' not found after $MAX_ATTEMPTS attempts (trigger file persists as fallback)" >&2
+        else
+            echo "--- [$(date '+%H:%M:%S')] Message typed into ${AGENT_NAME} pane ---"
+        fi
     fi
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
@@ -1309,6 +1325,13 @@ HELPER
             '${PROMPT_DIR}/send-to-agent.sh' PM "COMPLETE: All tasks finished (auto-notify)"
             echo "--- [\$(date '+%H:%M:%S')] Auto-sent COMPLETE to PM ---"
             rm -f "\$COMPLETE_MARKER"
+        fi
+        # Check for trigger file that arrived while session was active (AppleScript delivery failed)
+        if [ -f "\$TRIGGER_FILE" ]; then
+            PENDING_MSG=\$(cat "\$TRIGGER_FILE")
+            rm -f "\$TRIGGER_FILE"
+            echo "--- [\$(date '+%H:%M:%S')] Found pending message during post-session check (\${#PENDING_MSG} chars) ---"
+            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
         fi
         sleep 5
     done
