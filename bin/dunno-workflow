@@ -952,10 +952,9 @@ cmd_start() {
     # AppleScript's ~4KB string truncation limit.
     AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
 
-    # Check if target is a worker (has a polling loop) by looking for a launcher
-    # that contains the trigger-file polling pattern
+    # Check if target is a worker (has an event-driven polling loop)
     LAUNCHER="$SCRIPT_DIR/run-${AGENT_NAME}.sh"
-    if [ -f "$LAUNCHER" ] && grep -q "TRIGGER_FILE=" "$LAUNCHER" 2>/dev/null; then
+    if [ -f "$LAUNCHER" ] && grep -q "Event-driven loop" "$LAUNCHER" 2>/dev/null; then
         IS_WORKER=true
     else
         IS_WORKER=false
@@ -1290,9 +1289,18 @@ HELPER
     
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
 
     while true; do
-        claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+        # Check for pending trigger file (message arrived while session was down)
+        if [ -f "\$TRIGGER_FILE" ]; then
+            PENDING_MSG=\$(cat "\$TRIGGER_FILE")
+            rm -f "\$TRIGGER_FILE"
+            echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
+            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+        else
+            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+        fi
         echo ""
         echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
         # Auto-notify: guarantee COMPLETE reaches PM if session ended after work was done
@@ -1387,6 +1395,10 @@ LAUNCHER
     # ==================== Cleanup Previous Sessions ====================
     
     echo "Cleaning up previous agent sessions..."
+
+    # Remove stale trigger files from previous runs
+    rm -rf "$PROMPT_DIR/triggers" 2>/dev/null || true
+
     CLEANUP_NAMES=""
     for agent in "${AGENTS[@]}"; do
         label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
