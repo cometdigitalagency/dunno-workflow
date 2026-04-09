@@ -916,21 +916,41 @@ cmd_start() {
     AGENT_NAME=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     shift
     MESSAGE="$*"
-    
+
     # Write trigger file for the worker's file-watch loop
     TRIGGER_DIR="$SCRIPT_DIR/triggers"
-    mkdir -p "$TRIGGER_DIR"
-    printf '%s\n' "$MESSAGE" > "$TRIGGER_DIR/${AGENT_NAME}.trigger"
-    
+    if ! mkdir -p "$TRIGGER_DIR" 2>/dev/null; then
+        echo "ERROR: Failed to create trigger directory: $TRIGGER_DIR" >&2
+        exit 1
+    fi
+
+    TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.trigger"
+    if ! printf '%s\n' "$MESSAGE" > "$TRIGGER_FILE"; then
+        echo "ERROR: Failed to write trigger file: $TRIGGER_FILE" >&2
+        exit 1
+    fi
+
+    # Verify the write succeeded (non-empty)
+    if [ ! -s "$TRIGGER_FILE" ]; then
+        echo "ERROR: Trigger file is empty after write: $TRIGGER_FILE" >&2
+        exit 1
+    fi
+
+    # Track DONE messages so auto-DONE doesn't duplicate them
+    case "$MESSAGE" in
+        DONE-*|Done-*)
+            touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
+            ;;
+    esac
+
     # Show a brief notice in the iTerm2 pane (NOT the full message — long messages
     # get truncated by AppleScript and interfere with the worker's polling loop).
     # The worker reads the full message from the trigger file.
     AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
     PREVIEW="${MESSAGE:0:120}"
     [ ${#MESSAGE} -gt 120 ] && PREVIEW="${PREVIEW}..."
-    NOTICE="--- [$(date '+%H:%M:%S')] Message received (${#MESSAGE} chars): ${PREVIEW} ---"
 
-    osascript << EOF 2>/dev/null
+    RESULT=$(osascript << EOF 2>&1 || true
     tell application "iTerm2"
         repeat with w in windows
             repeat with t in tabs of w
@@ -948,6 +968,25 @@ cmd_start() {
         return "not_found"
     end tell
 EOF
+    )
+    if [ "$RESULT" = "not_found" ]; then
+        echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
+    fi
+
+    # Wait for receiver to ACK (max 30s)
+    ACK_FILE="$TRIGGER_DIR/${AGENT_NAME}.ack"
+    WAIT=0
+    while [ ! -f "$ACK_FILE" ] && [ $WAIT -lt 30 ]; do
+        sleep 1
+        WAIT=$((WAIT + 1))
+    done
+
+    if [ -f "$ACK_FILE" ]; then
+        echo "--- [$(date '+%H:%M:%S')] Acknowledged by ${AGENT_NAME} (${WAIT}s) ---"
+        rm -f "$ACK_FILE"
+    else
+        echo "WARNING: ${AGENT_NAME} did not acknowledge after 30s — trigger file may be pending" >&2
+    fi
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
     
@@ -1255,21 +1294,37 @@ LAUNCHER
         if [ -f "\$TRIGGER_FILE" ]; then
             # Move trigger to a work file so new messages don't collide
             WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
-            mv "\$TRIGGER_FILE" "\$WORK_FILE"
+            if ! mv "\$TRIGGER_FILE" "\$WORK_FILE" 2>/dev/null; then
+                echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file vanished before pickup (race condition) ---"
+                continue
+            fi
+
+            # ACK: confirm message pickup so sender knows we got it
+            printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
+
             if [ -s "\$WORK_FILE" ]; then
                 PREVIEW=\$(head -c 200 "\$WORK_FILE")
                 echo ""
                 echo "--- [\$(date '+%H:%M:%S')] Received message (\$(wc -c < "\$WORK_FILE" | tr -d ' ') bytes) ---"
                 echo "    \${PREVIEW:0:200}..."
                 echo ""
+                # Clean done-sent marker from previous run
+                rm -f "\$TRIGGER_DIR/${agent}.done-sent"
                 # Pipe from file to avoid CLI argument length limits on long messages
                 cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
                 echo ""
-                # Auto-notify: guarantee DONE reaches architect even if claude -p didn't call send-to-agent.sh
-                '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
-                echo "--- [\$(date '+%H:%M:%S')] Auto-sent DONE-${agent} to ${auto_start_agent} ---"
+                # Auto-notify: only send DONE if the agent didn't already send it
+                if [ ! -f "\$TRIGGER_DIR/${agent}.done-sent" ]; then
+                    '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
+                    echo "--- [\$(date '+%H:%M:%S')] Auto-sent DONE-${agent} to ${auto_start_agent} ---"
+                else
+                    echo "--- [\$(date '+%H:%M:%S')] Agent already sent DONE — skipping auto-notify ---"
+                fi
+                rm -f "\$TRIGGER_DIR/${agent}.done-sent"
                 echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
                 echo ""
+            else
+                echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file was empty — skipping ---" >&2
             fi
             rm -f "\$WORK_FILE"
         else

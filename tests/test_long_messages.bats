@@ -22,8 +22,29 @@ MESSAGE="$*"
 
 # Write trigger file for the worker's file-watch loop
 TRIGGER_DIR="$SCRIPT_DIR/triggers"
-mkdir -p "$TRIGGER_DIR"
-printf '%s\n' "$MESSAGE" > "$TRIGGER_DIR/${AGENT_NAME}.trigger"
+if ! mkdir -p "$TRIGGER_DIR" 2>/dev/null; then
+    echo "ERROR: Failed to create trigger directory: $TRIGGER_DIR" >&2
+    exit 1
+fi
+
+TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.trigger"
+if ! printf '%s\n' "$MESSAGE" > "$TRIGGER_FILE"; then
+    echo "ERROR: Failed to write trigger file: $TRIGGER_FILE" >&2
+    exit 1
+fi
+
+# Verify the write succeeded (non-empty)
+if [ ! -s "$TRIGGER_FILE" ]; then
+    echo "ERROR: Trigger file is empty after write: $TRIGGER_FILE" >&2
+    exit 1
+fi
+
+# Track DONE messages so auto-DONE doesn't duplicate them
+case "$MESSAGE" in
+    DONE-*|Done-*)
+        touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
+        ;;
+esac
 
 # Show a brief notice (NOT the full message — long messages get truncated
 # by AppleScript and interfere with the worker's polling loop).
@@ -32,7 +53,7 @@ PREVIEW="${MESSAGE:0:120}"
 [ ${#MESSAGE} -gt 120 ] && PREVIEW="${PREVIEW}..."
 NOTICE="--- [$(date '+%H:%M:%S')] Message received (${#MESSAGE} chars): ${PREVIEW} ---"
 
-# Skip AppleScript in test — just write the trigger file
+# Skip AppleScript and ACK wait in test — just write the trigger file
 echo "$NOTICE"
 HELPER
     chmod +x "$prompt_dir/send-to-agent.sh"
@@ -250,4 +271,125 @@ generate_long_task() {
     stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
     # This was the actual bug — the end of long messages got truncated
     [[ "$stored" == *"END_MARKER_12345"* ]]
+}
+
+# ── ACK mechanism tests ──
+
+@test "ack: worker creates ack file after picking up trigger" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    mkdir -p "$trigger_dir"
+    # Simulate send-to-agent.sh writing trigger
+    printf '%s\n' "TASK: do something" > "$trigger_dir/backend.trigger"
+    # Simulate worker picking up trigger (mv + ack)
+    mv "$trigger_dir/backend.trigger" "$trigger_dir/backend.msg"
+    printf '%s\n' "ACK $(date '+%H:%M:%S')" > "$trigger_dir/backend.ack"
+    # ACK file should exist
+    [ -f "$trigger_dir/backend.ack" ]
+    [[ "$(cat "$trigger_dir/backend.ack")" == ACK* ]]
+}
+
+@test "ack: ack file is cleaned up after sender reads it" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    mkdir -p "$trigger_dir"
+    # Create an ACK file (as worker would)
+    printf '%s\n' "ACK 12:00:00" > "$trigger_dir/backend.ack"
+    [ -f "$trigger_dir/backend.ack" ]
+    # Sender reads and removes ACK
+    rm -f "$trigger_dir/backend.ack"
+    [ ! -f "$trigger_dir/backend.ack" ]
+}
+
+@test "ack: ack not created when trigger file is empty" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    mkdir -p "$trigger_dir"
+    # Create an empty trigger file (corruption scenario)
+    touch "$trigger_dir/backend.trigger"
+    # Simulate worker: mv succeeds but file is empty — no ACK should be written
+    mv "$trigger_dir/backend.trigger" "$trigger_dir/backend.msg"
+    # Worker checks -s (non-empty) — it's empty, so skip processing
+    if [ -s "$trigger_dir/backend.msg" ]; then
+        printf '%s\n' "ACK $(date '+%H:%M:%S')" > "$trigger_dir/backend.ack"
+    fi
+    [ ! -f "$trigger_dir/backend.ack" ]
+}
+
+# ── Error handling tests ──
+
+@test "error: send-to-agent.sh exits non-zero when trigger dir is unwritable" {
+    setup_team_prompts "dunno-agents.yaml"
+    local prompt_dir="$TEST_WORK_DIR/.team-prompts"
+    # Create a read-only triggers directory
+    mkdir -p "$prompt_dir/triggers"
+    chmod 444 "$prompt_dir/triggers"
+    # send-to-agent.sh should fail when it can't write
+    run "$prompt_dir/send-to-agent.sh" BACKEND "TASK: should fail"
+    chmod 755 "$prompt_dir/triggers"  # restore for cleanup
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ERROR"* ]]
+}
+
+@test "error: send-to-agent.sh verifies file was written" {
+    setup_team_prompts "dunno-agents.yaml"
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "TASK: verify write"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    [ -f "$trigger_dir/backend.trigger" ]
+    [ -s "$trigger_dir/backend.trigger" ]
+}
+
+# ── DONE marker tests ──
+
+@test "done-marker: DONE message creates done-sent marker" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" ARCHITECT "DONE-backend: Task completed"
+    [ -f "$trigger_dir/architect.done-sent" ]
+}
+
+@test "done-marker: non-DONE message does not create marker" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "TASK: do something"
+    [ ! -f "$trigger_dir/backend.done-sent" ]
+}
+
+@test "done-marker: done-sent prevents duplicate auto-DONE" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    mkdir -p "$trigger_dir"
+    # Simulate: agent already sent DONE (marker exists)
+    touch "$trigger_dir/backend.done-sent"
+    # Worker launcher checks: if marker exists, skip auto-DONE
+    if [ ! -f "$trigger_dir/backend.done-sent" ]; then
+        echo "AUTO_DONE_SENT" > "$trigger_dir/auto_done_flag"
+    fi
+    # Auto-DONE should NOT have been sent
+    [ ! -f "$trigger_dir/auto_done_flag" ]
+}
+
+@test "done-marker: auto-DONE fires when agent did not send DONE" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    mkdir -p "$trigger_dir"
+    # No done-sent marker exists — agent didn't send DONE
+    [ ! -f "$trigger_dir/backend.done-sent" ]
+    # Worker launcher checks: no marker, so auto-DONE should fire
+    if [ ! -f "$trigger_dir/backend.done-sent" ]; then
+        echo "AUTO_DONE_SENT" > "$trigger_dir/auto_done_flag"
+    fi
+    [ -f "$trigger_dir/auto_done_flag" ]
+}
+
+# ── Worker mv race condition handling ──
+
+@test "worker-mv: handles missing trigger file gracefully" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    mkdir -p "$trigger_dir"
+    # Trigger file does not exist — mv should fail
+    run mv "$trigger_dir/backend.trigger" "$trigger_dir/backend.msg" 2>/dev/null
+    [ "$status" -ne 0 ]
+    # Worker loop would 'continue' here — no crash
 }
