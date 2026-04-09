@@ -1195,7 +1195,7 @@ HELPER
                 done
                 echo 'echo "╚══════════════════════════════════════╝"'
                 echo 'echo ""'
-                echo "exec claude --append-system-prompt \"\$SYSTEM_PROMPT\" -n \"${agent}\" \"\$INIT_PROMPT\""
+                echo "exec claude --append-system-prompt \"\$SYSTEM_PROMPT\" --allowedTools \"${allowed_tools}\" -n \"${agent}\" \"\$INIT_PROMPT\""
             } > "$PROMPT_DIR/run-${agent}.sh"
         else
             local starts_immediately
