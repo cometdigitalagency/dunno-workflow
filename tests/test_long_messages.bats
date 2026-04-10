@@ -382,6 +382,35 @@ generate_long_task() {
     [ -f "$trigger_dir/auto_done_flag" ]
 }
 
+# ── Trigger file persistence for non-worker targets ──
+
+@test "long-msg: trigger file persists for non-worker delivery (architect)" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    # Send a DONE message to ARCHITECT (non-worker target)
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" ARCHITECT "DONE-backend: All tasks completed successfully"
+    # Trigger file must exist and be non-empty — this is the fallback
+    # when AppleScript pane delivery fails (the bug this fix addresses)
+    [ -f "$trigger_dir/architect.trigger" ]
+    [ -s "$trigger_dir/architect.trigger" ]
+    local stored
+    stored=$(cat "$trigger_dir/architect.trigger")
+    [[ "$stored" == *"DONE-backend"* ]]
+    [[ "$stored" == *"All tasks completed successfully"* ]]
+}
+
+@test "long-msg: trigger file persists for non-worker delivery (pm)" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    # Send a COMPLETE message to PM (non-worker target)
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" PM "COMPLETE: All tickets resolved"
+    [ -f "$trigger_dir/pm.trigger" ]
+    [ -s "$trigger_dir/pm.trigger" ]
+    local stored
+    stored=$(cat "$trigger_dir/pm.trigger")
+    [[ "$stored" == *"COMPLETE"* ]]
+}
+
 # ── Worker mv race condition handling ──
 
 @test "worker-mv: handles missing trigger file gracefully" {
@@ -392,4 +421,137 @@ generate_long_task() {
     run mv "$trigger_dir/backend.trigger" "$trigger_dir/backend.msg" 2>/dev/null
     [ "$status" -ne 0 ]
     # Worker loop would 'continue' here — no crash
+}
+
+# ── Issue #2: Retry logic for non-worker pane delivery ──
+
+@test "issue2: send-to-agent.sh source has retry logic for non-worker delivery" {
+    # The fix adds retry attempts (3 attempts, 3s apart) for non-worker targets
+    # when iTerm2 pane is not found. Verify the retry logic exists in the source.
+    grep -q "MAX_ATTEMPTS=3" "$DUNNO_WORKFLOW"
+    grep -q 'retry.*ATTEMPT.*MAX_ATTEMPTS' "$DUNNO_WORKFLOW" || \
+        grep -q 'ATTEMPT.*MAX_ATTEMPTS' "$DUNNO_WORKFLOW"
+}
+
+@test "issue2: send-to-agent.sh source has trigger file fallback for non-workers" {
+    # Even after retries fail, the trigger file persists as a fallback
+    grep -q "trigger file persists as fallback" "$DUNNO_WORKFLOW"
+}
+
+@test "issue2: trigger file persists for non-worker targets after send-to-agent.sh call" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    # Send DONE to architect (non-worker) — trigger file must persist
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" ARCHITECT "DONE-qa: Tests all passed"
+    [ -f "$trigger_dir/architect.trigger" ]
+    [ -s "$trigger_dir/architect.trigger" ]
+    [[ "$(cat "$trigger_dir/architect.trigger")" == *"DONE-qa"* ]]
+}
+
+@test "issue2: done-sent marker created when sending DONE messages" {
+    setup_team_prompts "dunno-agents.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" ARCHITECT "DONE-dev: Feature implemented"
+    [ -f "$trigger_dir/architect.done-sent" ]
+}
+
+# ── Issue #5: COMPLETE marker (.work-done) and auto-notify ──
+
+@test "issue5: architect launcher template contains .work-done marker check" {
+    # The fix adds a COMPLETE_MARKER check in the architect (auto_start) launcher
+    grep -q '.work-done' "$DUNNO_WORKFLOW"
+}
+
+@test "issue5: architect launcher template has auto-notify COMPLETE to PM" {
+    # When .work-done exists, architect should auto-send COMPLETE to PM
+    grep -q 'COMPLETE_MARKER' "$DUNNO_WORKFLOW"
+    grep -q "Auto-sent COMPLETE to PM" "$DUNNO_WORKFLOW"
+}
+
+@test "issue5: architect launcher template removes .work-done after sending" {
+    # The marker should be cleaned up after auto-notify
+    grep -q 'rm -f.*COMPLETE_MARKER' "$DUNNO_WORKFLOW"
+}
+
+# ── Issue #6: Post-session trigger check in architect launcher ──
+
+@test "issue6: architect launcher has post-session trigger check" {
+    # The fix checks for trigger files that arrived while session was active
+    grep -q "Found pending message during post-session check" "$DUNNO_WORKFLOW"
+}
+
+@test "issue6: post-session check appears AFTER .work-done block" {
+    # Verify ordering: COMPLETE_MARKER block first, then post-session trigger check
+    local marker_line post_session_line
+    marker_line=$(grep -n 'COMPLETE_MARKER' "$DUNNO_WORKFLOW" | head -1 | cut -d: -f1)
+    post_session_line=$(grep -n 'Found pending message during post-session check' "$DUNNO_WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$marker_line" ]
+    [ -n "$post_session_line" ]
+    [ "$post_session_line" -gt "$marker_line" ]
+}
+
+@test "issue6: post-session check appears BEFORE sleep 5" {
+    # Verify ordering: post-session trigger check before the restart sleep
+    local post_session_line sleep_line
+    post_session_line=$(grep -n 'Found pending message during post-session check' "$DUNNO_WORKFLOW" | head -1 | cut -d: -f1)
+    sleep_line=$(grep -n 'sleep 5' "$DUNNO_WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$post_session_line" ]
+    [ -n "$sleep_line" ]
+    [ "$post_session_line" -lt "$sleep_line" ]
+}
+
+# ── PM Bash REPL launcher tests ──
+
+@test "pm-repl: PM launcher template has REPL loop" {
+    grep -q 'read -r -p "PM> "' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has status command" {
+    grep -q 'status)' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_LIST_OPEN' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has tell command" {
+    grep -q 'tell\\ \*)' "$DUNNO_WORKFLOW"
+    grep -q 'send-to-agent.sh' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has close command" {
+    grep -q 'close\\ \*' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_CLOSE' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has view command" {
+    grep -q 'view\\ \*' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_VIEW' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has help command" {
+    grep -q 'help)' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has LLM fallback" {
+    # Unrecognized input falls back to claude -p
+    grep -q 'claude -p' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template has background trigger watcher" {
+    grep -q 'INCOMING MESSAGE' "$DUNNO_WORKFLOW"
+    grep -q 'BG_PID' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher template embeds ticket command variables" {
+    grep -q 'CMD_LIST_OPEN=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_LIST_READY=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_VIEW=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_CLOSE=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_CLAIM=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_COMMENT=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_CREATE=' "$DUNNO_WORKFLOW"
+    grep -q 'CMD_LIST_STALE=' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher does NOT use exec claude for interactive" {
+    # The REPL replaced the old exec claude pattern for interactive agents
+    ! grep -q 'exec claude.*append-system-prompt' "$DUNNO_WORKFLOW"
 }

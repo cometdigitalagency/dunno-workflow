@@ -1266,24 +1266,148 @@ HELPER
         done
     
         if [ "$interactive" = "true" ]; then
-            # Interactive agent (PM) — single session, no restart loop
-            {
-                echo '#!/bin/bash'
-                echo "cd '${REPO_DIR}'"
-                echo "printf '\\033]0;${label}\\007'"
-                echo "SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')"
-                echo "INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')"
-                echo 'echo "╔══════════════════════════════════════╗"'
-                echo "echo \"║       ${label}                       ║\""
-                echo 'echo "╠══════════════════════════════════════╣"'
-                echo 'echo "║  Commands:                           ║"'
-                yq_get ".agents.$agent.commands // {} | keys | .[]" 2>/dev/null | head -6 | while IFS= read -r cmd; do
-                    printf 'echo "║  • %-35s║"\n' "$cmd"
-                done
-                echo 'echo "╚══════════════════════════════════════╝"'
-                echo 'echo ""'
-                echo "exec claude --append-system-prompt \"\$SYSTEM_PROMPT\" --allowedTools \"${allowed_tools}\" -n \"${agent}\" \"\$INIT_PROMPT\""
-            } > "$PROMPT_DIR/run-${agent}.sh"
+            # Interactive agent (PM) — bash REPL with LLM fallback
+            sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
+    #!/bin/bash
+    cd '${REPO_DIR}'
+    printf '\033]0;${label}\007'
+    SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
+    PROMPT_DIR='${PROMPT_DIR}'
+    TRIGGER_DIR='${PROMPT_DIR}/triggers'
+    mkdir -p "\$TRIGGER_DIR"
+
+    # Ticket commands (generated from workflow.yaml tickets.source)
+    CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
+    CMD_LIST_READY="${TICKET_LIST_READY}"
+    CMD_VIEW="${TICKET_VIEW}"
+    CMD_CLAIM="${TICKET_CLAIM}"
+    CMD_COMMENT="${TICKET_COMMENT}"
+    CMD_CLOSE="${TICKET_CLOSE}"
+    CMD_CREATE="${TICKET_CREATE}"
+    CMD_LIST_STALE="${TICKET_LIST_STALE}"
+
+    # Banner
+    echo "╔══════════════════════════════════════╗"
+    echo "║       ${label}                       ║"
+    echo "╠══════════════════════════════════════╣"
+    echo "║  Commands:                           ║"
+    echo "║  • status                            ║"
+    echo "║  • backlog                           ║"
+    echo "║  • view <N>                          ║"
+    echo "║  • close <N>                         ║"
+    echo "║  • claim <N>                         ║"
+    echo "║  • comment <N> <msg>                 ║"
+    echo "║  • tell <agent> <msg>                ║"
+    echo "║  • stale                             ║"
+    echo "║  • ai <prompt>  (uses LLM)           ║"
+    echo "║  • help                              ║"
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+
+    # Background: watch for incoming messages (COMPLETE, etc.)
+    (while true; do
+        if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
+            MSG=\$(cat "\$TRIGGER_DIR/${agent}.trigger")
+            rm -f "\$TRIGGER_DIR/${agent}.trigger"
+            # ACK the pickup
+            printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
+            echo ""
+            echo "═══════════════════════════════════════"
+            echo "  INCOMING MESSAGE"
+            echo "═══════════════════════════════════════"
+            echo "  \$MSG"
+            echo "═══════════════════════════════════════"
+            echo ""
+            printf "PM> "
+        fi
+        sleep 2
+    done) &
+    BG_PID=\$!
+    trap "kill \$BG_PID 2>/dev/null" EXIT
+
+    # REPL
+    while true; do
+        read -r -p "PM> " INPUT || break
+        [ -z "\$INPUT" ] && continue
+
+        case "\$INPUT" in
+            help)
+                echo ""
+                echo "  status              List open tickets"
+                echo "  backlog             List ready tickets"
+                echo "  view <N>            View ticket #N"
+                echo "  close <N>           Close ticket #N"
+                echo "  claim <N>           Claim ticket #N (mark in-progress)"
+                echo "  comment <N> <msg>   Comment on ticket #N"
+                echo "  tell <agent> <msg>  Send message to an agent"
+                echo "  stale               List stale in-progress tickets"
+                echo "  ai <prompt>         Ask Claude (uses LLM tokens)"
+                echo "  quit                Exit PM"
+                echo ""
+                ;;
+            status)
+                echo ""
+                eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "  (no tickets found)"
+                echo ""
+                ;;
+            backlog|"show backlog")
+                echo ""
+                eval "\$CMD_LIST_READY" 2>/dev/null || echo "  (no ready tickets)"
+                echo ""
+                ;;
+            stale)
+                echo ""
+                eval "\$CMD_LIST_STALE" 2>/dev/null || echo "  (no stale tickets)"
+                echo ""
+                ;;
+            view\ *|issue\ *)
+                N=\$(echo "\$INPUT" | sed 's/^[a-z]* #*//' | tr -d ' ')
+                eval "\$(echo "\$CMD_VIEW" | sed "s/\\\$N/\$N/g")" 2>/dev/null || echo "  ERROR: could not view ticket \$N"
+                echo ""
+                ;;
+            close\ *|"close issue"\ *)
+                N=\$(echo "\$INPUT" | sed 's/^close *issue *#*//' | sed 's/^close *//' | tr -d ' ')
+                echo "  Closing ticket #\$N..."
+                eval "\$(echo "\$CMD_CLOSE" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not close ticket \$N"
+                echo ""
+                ;;
+            claim\ *)
+                N=\$(echo "\$INPUT" | sed 's/^claim *#*//' | tr -d ' ')
+                echo "  Claiming ticket #\$N..."
+                eval "\$(echo "\$CMD_CLAIM" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not claim ticket \$N"
+                echo ""
+                ;;
+            comment\ *)
+                N=\$(echo "\$INPUT" | awk '{print \$2}' | tr -d '#')
+                MSG=\$(echo "\$INPUT" | sed 's/^comment *[#0-9]* *//')
+                eval "\$(echo "\$CMD_COMMENT" | sed "s/\\\$N/\$N/g" | sed "s/\\\$MSG/\$MSG/g")" 2>/dev/null && echo "  Comment added." || echo "  ERROR: could not comment on ticket \$N"
+                echo ""
+                ;;
+            tell\ *)
+                AGENT=\$(echo "\$INPUT" | awk '{print toupper(\$2)}')
+                MSG=\$(echo "\$INPUT" | sed 's/^tell *[^ ]* *//')
+                '\${PROMPT_DIR}/send-to-agent.sh' "\$AGENT" "\$MSG"
+                echo ""
+                ;;
+            ai\ *)
+                PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
+                echo ""
+                echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                echo ""
+                ;;
+            quit|exit)
+                echo "  Goodbye."
+                break
+                ;;
+            *)
+                # Unrecognized — fall back to LLM
+                echo ""
+                echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                echo ""
+                ;;
+        esac
+    done
+LAUNCHER
         else
             local starts_immediately
             starts_immediately=$(yq_get ".agents.$agent.auto_start // false")
