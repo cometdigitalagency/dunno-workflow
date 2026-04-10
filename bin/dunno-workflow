@@ -1266,6 +1266,13 @@ HELPER
         done
     
         if [ "$interactive" = "true" ]; then
+            # Build list of non-interactive agents for the REPL
+            local _agent_list=""
+            for _a in "${AGENTS[@]}"; do
+                [ "$_a" != "$agent" ] && _agent_list+="$_a "
+            done
+            _agent_list="${_agent_list% }"  # trim trailing space
+
             # Interactive agent (PM) — bash REPL with LLM fallback
             sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
@@ -1275,6 +1282,9 @@ HELPER
     PROMPT_DIR='${PROMPT_DIR}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+
+    # Agent list (non-interactive agents from workflow.yaml)
+    AGENT_LIST="${_agent_list}"
 
     # Ticket commands (generated from workflow.yaml tickets.source)
     CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
@@ -1298,6 +1308,7 @@ HELPER
     echo "║  • claim <N>                         ║"
     echo "║  • comment <N> <msg>                 ║"
     echo "║  • tell <agent> <msg>                ║"
+    echo "║  • agents                            ║"
     echo "║  • stale                             ║"
     echo "║  • ai <prompt>  (uses LLM)           ║"
     echo "║  • help                              ║"
@@ -1340,6 +1351,7 @@ HELPER
                 echo "  claim <N>           Claim ticket #N (mark in-progress)"
                 echo "  comment <N> <msg>   Comment on ticket #N"
                 echo "  tell <agent> <msg>  Send message to an agent"
+                echo "  agents              Show agent statuses"
                 echo "  stale               List stale in-progress tickets"
                 echo "  ai <prompt>         Ask Claude (uses LLM tokens)"
                 echo "  quit                Exit PM"
@@ -1384,9 +1396,36 @@ HELPER
                 echo ""
                 ;;
             tell\ *)
-                AGENT=\$(echo "\$INPUT" | awk '{print toupper(\$2)}')
-                MSG=\$(echo "\$INPUT" | sed 's/^tell *[^ ]* *//')
-                '\${PROMPT_DIR}/send-to-agent.sh' "\$AGENT" "\$MSG"
+                AGENT=\$(echo "\$INPUT" | awk '{print tolower(\$2)}')
+                if ! echo " \$AGENT_LIST " | grep -q " \$AGENT "; then
+                    echo "  Unknown agent: \$AGENT"
+                    echo "  Available: \$AGENT_LIST"
+                else
+                    MSG=\$(echo "\$INPUT" | sed 's/^tell *[^ ]* *//')
+                    AGENT_UPPER=\$(echo "\$AGENT" | tr '[:lower:]' '[:upper:]')
+                    '\${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
+                    echo "  Sent to \$AGENT."
+                fi
+                echo ""
+                ;;
+            agents|team)
+                echo ""
+                printf "  %-14s %-10s %s\n" "AGENT" "STATUS" "DURATION"
+                printf "  %-14s %-10s %s\n" "─────" "──────" "────────"
+                for _a in \$AGENT_LIST; do
+                    if [ -f "\$TRIGGER_DIR/\${_a}.msg" ]; then
+                        _elapsed=\$(( \$(date +%s) - \$(stat -f %m "\$TRIGGER_DIR/\${_a}.msg") ))
+                        _min=\$(( _elapsed / 60 ))
+                        _sec=\$(( _elapsed % 60 ))
+                        printf "  %-14s %-10s %sm %ss\n" "\$_a" "● working" "\$_min" "\$_sec"
+                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ]; then
+                        printf "  %-14s %-10s %s\n" "\$_a" "◉ pending" "—"
+                    elif [ -f "\$TRIGGER_DIR/\${_a}.done-sent" ]; then
+                        printf "  %-14s %-10s %s\n" "\$_a" "✓ done" "—"
+                    else
+                        printf "  %-14s %-10s %s\n" "\$_a" "○ idle" "—"
+                    fi
+                done
                 echo ""
                 ;;
             ai\ *)
@@ -1431,17 +1470,22 @@ LAUNCHER
     mkdir -p "\$TRIGGER_DIR"
     TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
 
+    echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+
     while true; do
         # Check for pending trigger file (message arrived while session was down)
         if [ -f "\$TRIGGER_FILE" ]; then
             PENDING_MSG=\$(cat "\$TRIGGER_FILE")
             rm -f "\$TRIGGER_FILE"
+            echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
         else
+            echo "working \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
         fi
         echo ""
+        echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
         echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
         # Auto-notify: guarantee COMPLETE reaches PM if session ended after work was done
         COMPLETE_MARKER="\$TRIGGER_DIR/.work-done"
@@ -1477,6 +1521,8 @@ LAUNCHER
     echo "╚══════════════════════════════════════╝"
     echo ""
     
+    echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+
     # Event-driven loop: wait for trigger file, start Claude with its contents
     while true; do
         if [ -f "\$TRIGGER_FILE" ]; then
@@ -1491,6 +1537,8 @@ LAUNCHER
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
 
             if [ -s "\$WORK_FILE" ]; then
+                TASK_PREVIEW=\$(head -c 50 "\$WORK_FILE")
+                echo "working \$(date +%s) \$TASK_PREVIEW" > "\$TRIGGER_DIR/${agent}.state"
                 PREVIEW=\$(head -c 200 "\$WORK_FILE")
                 echo ""
                 echo "--- [\$(date '+%H:%M:%S')] Received message (\$(wc -c < "\$WORK_FILE" | tr -d ' ') bytes) ---"
@@ -1509,6 +1557,7 @@ LAUNCHER
                     echo "--- [\$(date '+%H:%M:%S')] Agent already sent DONE — skipping auto-notify ---"
                 fi
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
+                echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
                 echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
                 echo ""
             else
@@ -1703,6 +1752,81 @@ ENDSCRIPT
         except Exception:
             pass
     
+    TRIGGER_DIR = os.path.join(os.path.dirname(LOG_DIR.rstrip("/")), ".team-prompts", "triggers")
+    SESSION_START = time.time()
+    DASHBOARD_LINES = 0
+
+    def render_dashboard():
+        global DASHBOARD_LINES
+        now = time.time()
+        session_elapsed = int(now - SESSION_START)
+        sm, ss = divmod(session_elapsed, 60)
+        sh, sm = divmod(sm, 60)
+
+        lines = []
+        lines.append("┌─ DASHBOARD ──────────────────────────────────────────────┐")
+        done_count = 0
+        working_count = 0
+        pending_count = 0
+        for agent in AGENTS:
+            state_file = os.path.join(TRIGGER_DIR, f"{agent}.state")
+            status = "idle"
+            duration = "—"
+            task_preview = ""
+            if os.path.exists(state_file):
+                try:
+                    content = open(state_file).read().strip()
+                    parts = content.split(" ", 2)
+                    status = parts[0] if parts else "idle"
+                    if len(parts) >= 2:
+                        elapsed = int(now - int(parts[1]))
+                        em, es = divmod(elapsed, 60)
+                        duration = f"{em}m {es:02d}s"
+                    if len(parts) >= 3:
+                        task_preview = parts[2][:40]
+                except Exception:
+                    pass
+            # Also check trigger/msg files as fallback
+            msg_file = os.path.join(TRIGGER_DIR, f"{agent}.msg")
+            trigger_file = os.path.join(TRIGGER_DIR, f"{agent}.trigger")
+            done_file = os.path.join(TRIGGER_DIR, f"{agent}.done-sent")
+            if os.path.exists(msg_file) and status != "working":
+                status = "working"
+            if os.path.exists(done_file):
+                done_count += 1
+            if status == "working":
+                working_count += 1
+                icon = "●"
+                color = COLORS.get(agent, "")
+            elif os.path.exists(trigger_file):
+                pending_count += 1
+                icon = "◉"
+                color = "\033[33m"
+            else:
+                icon = "○"
+                color = ""
+            label = LABELS.get(agent, agent.upper())
+            task_str = f"  {task_preview}" if task_preview else ""
+            lines.append(f"│  {color}{label:<10}{RESET} {icon} {status:<10} {duration:<10}{task_str:<28}│")
+        lines.append(f"│  Tasks: {done_count} done · {working_count} ongoing · {pending_count} pending{' ' * 20}│")
+        if sh > 0:
+            lines.append(f"│  Session: {sh}h {sm:02d}m {ss:02d}s{' ' * 38}│")
+        else:
+            lines.append(f"│  Session: {sm}m {ss:02d}s{' ' * 41}│")
+        lines.append("└──────────────────────────────────────────────────────────┘")
+
+        # Save cursor, move to top, render dashboard, restore cursor
+        output = "\033[s\033[H"
+        for line in lines:
+            output += f"\033[K{line}\n"
+        output += "\033[u"
+        print(output, end="", flush=True)
+
+        # Reserve space on first render
+        if DASHBOARD_LINES == 0:
+            DASHBOARD_LINES = len(lines)
+            print("\n" * DASHBOARD_LINES, flush=True)
+
     async def main(connection):
         app = await iterm2.async_get_app(connection)
         sessions = {}
@@ -1716,24 +1840,25 @@ ENDSCRIPT
                         if agent in name_lower and agent not in sessions:
                             sessions[agent] = session
                             break
-    
+
         if not sessions:
             print("No agent sessions found. Retrying in 5s...")
             await asyncio.sleep(5)
             return
-    
+
         print(f"Logging {len(sessions)} sessions (polling every {POLL_INTERVAL}s)")
         print()
-    
+
         log_files = {}
         for agent in sessions:
             log_files[agent] = open(os.path.join(LOG_DIR, f"{agent}.log"), "a", buffering=1)
-    
+
         prev_contents = {agent: "" for agent in sessions}
         waiting_since = {}
         last_notif = {}
-    
+
         while True:
+            render_dashboard()
             for agent, session in sessions.items():
                 try:
                     contents = await session.async_get_screen_contents()

@@ -555,3 +555,68 @@ generate_long_task() {
     # The REPL replaced the old exec claude pattern for interactive agents
     ! grep -q 'exec claude.*append-system-prompt' "$DUNNO_WORKFLOW"
 }
+
+# ── Agent status + tell validation tests ──
+
+@test "pm-repl: PM launcher has agents command" {
+    grep -q 'agents|team)' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: PM launcher embeds AGENT_LIST variable" {
+    grep -q 'AGENT_LIST=' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: tell command validates agent name" {
+    grep -q 'Unknown agent' "$DUNNO_WORKFLOW"
+    grep -q 'Available:' "$DUNNO_WORKFLOW"
+}
+
+@test "pm-repl: agents command shows status from trigger files" {
+    grep -q '\.msg"' "$DUNNO_WORKFLOW"
+    grep -q '\.trigger"' "$DUNNO_WORKFLOW"
+    grep -q '\.done-sent"' "$DUNNO_WORKFLOW"
+    grep -q 'working' "$DUNNO_WORKFLOW"
+    grep -q 'idle' "$DUNNO_WORKFLOW"
+}
+
+# ── State file tracking tests ──
+
+@test "state: worker launcher writes state file on working" {
+    grep -q '\.state"' "$DUNNO_WORKFLOW"
+    grep -q 'working.*date +%s' "$DUNNO_WORKFLOW"
+}
+
+@test "state: worker launcher writes state file on idle" {
+    grep -q 'idle.*date +%s' "$DUNNO_WORKFLOW"
+}
+
+@test "state: architect launcher writes state file" {
+    grep -q '\.state"' "$DUNNO_WORKFLOW"
+}
+
+# ── Dashboard tests ──
+
+@test "dashboard: screen-logger.py has render_dashboard function" {
+    grep -q 'def render_dashboard' "$DUNNO_WORKFLOW"
+}
+
+@test "dashboard: render_dashboard reads state files" {
+    grep -q '\.state' "$DUNNO_WORKFLOW"
+    grep -q 'TRIGGER_DIR' "$DUNNO_WORKFLOW"
+}
+
+@test "dashboard: render_dashboard uses ANSI cursor control" {
+    # Saves/restores cursor position for pinned header
+    grep -q '033\[s' "$DUNNO_WORKFLOW"
+    grep -q '033\[H' "$DUNNO_WORKFLOW"
+    grep -q '033\[u' "$DUNNO_WORKFLOW"
+}
+
+@test "dashboard: render_dashboard shows task counts" {
+    grep -q 'done.*ongoing.*pending' "$DUNNO_WORKFLOW"
+}
+
+@test "dashboard: render_dashboard shows session elapsed time" {
+    grep -q 'SESSION_START' "$DUNNO_WORKFLOW"
+    grep -q 'Session:' "$DUNNO_WORKFLOW"
+}
