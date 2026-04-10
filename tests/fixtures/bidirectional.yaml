@@ -1,0 +1,147 @@
+project:
+  name: bidirectional-app
+  repo: test/bidirectional-app
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+    format: markdown
+
+events:
+  assign:
+    description: PM assigns work to planner
+    format: "ASSIGN: {description}"
+    direction: pm -> planner
+  task:
+    description: Planner dispatches to impl
+    format: "TASK: {description}"
+    direction: planner -> impl
+  done:
+    description: Implementation complete, ready for verification
+    format: "DONE-impl: {summary}"
+    direction: impl -> verifier
+  bug:
+    description: Verifier found a problem
+    format: "BUG: {description}"
+    direction: verifier -> impl
+  fix_request:
+    description: Verifier requests a specific fix
+    format: "FIX-REQUEST: {description}"
+    direction: verifier -> impl
+  fix_done:
+    description: Impl finished the fix
+    format: "FIX-DONE: {summary}"
+    direction: impl -> verifier
+  verified:
+    description: Verifier approves the work
+    format: "VERIFIED: {summary}"
+    direction: verifier -> planner
+  complete:
+    description: All work finished
+    format: "COMPLETE: done."
+    direction: planner -> pm
+
+agents:
+  pm:
+    role: Product Manager
+    description: User-facing interface.
+    interactive: true
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [assign]
+    receives: [complete]
+    workflow:
+      - "Take user input"
+      - "Assign work to planner"
+    rules:
+      - "Do not write code"
+    commands:
+      status: "List open tickets"
+      "tell <agent> ...": "Send message to agent"
+    init:
+      default: "I'm your PM. Give me work."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  planner:
+    role: Technical Planner
+    description: Plans work and dispatches to impl. Receives verified results.
+    interactive: false
+    auto_start: true
+    model: sonnet
+    tools: [read, bash, glob, grep]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [task, complete]
+    receives: [assign, verified]
+    workflow:
+      - "Pick up ready tickets"
+      - "Plan the implementation"
+      - "Dispatch TASK to impl"
+      - "Wait for VERIFIED from verifier"
+      - "Send COMPLETE to pm"
+    rules:
+      - "Do not write code"
+    init:
+      default: "Check for ready tickets."
+      test: "{default}"
+      issue: "Start on ticket #{issue_num}."
+    prompt_extra: ""
+
+  impl:
+    role: Implementer
+    description: Writes code. Receives tasks from planner and bugs from verifier.
+    interactive: false
+    model: sonnet
+    tools: [read, edit, write, bash, glob, grep]
+    owns:
+      paths: ["src/**"]
+      never_edit: ["tests/**"]
+    stack: [Python]
+    sends: [done, fix_done]
+    receives: [task, bug, fix_request]
+    workflow:
+      - "Wait for TASK or BUG or FIX-REQUEST"
+      - "Implement the change or fix"
+      - "Send DONE-impl or FIX-DONE"
+    rules:
+      - "Never edit test files"
+    init:
+      default: "Event-driven. Wait for messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  verifier:
+    role: Verifier
+    description: Reviews and tests implementation. Can send bugs back to impl.
+    interactive: false
+    model: sonnet
+    tools: [read, bash, glob, grep]
+    owns:
+      paths: ["tests/**"]
+      never_edit: ["src/**"]
+    stack: [pytest]
+    sends: [bug, fix_request, verified]
+    receives: [done, fix_done]
+    workflow:
+      - "Wait for DONE-impl or FIX-DONE"
+      - "Run tests and review code"
+      - "If problems found: send BUG or FIX-REQUEST to impl"
+      - "If all good: send VERIFIED to planner"
+    rules:
+      - "Never edit source files"
+      - "Always run tests before verifying"
+    init:
+      default: "Event-driven. Wait for messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

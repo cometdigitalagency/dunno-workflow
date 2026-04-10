@@ -1,0 +1,160 @@
+project:
+  name: parallel-app
+  repo: test/parallel-app
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+    format: markdown
+
+events:
+  assign:
+    description: PM assigns work to lead
+    format: "ASSIGN: {description}"
+    direction: pm -> lead
+  task:
+    description: Lead dispatches work to workers
+    format: "TASK: {description}"
+    direction: lead -> api | web
+  done:
+    description: Worker reports completion
+    format: "DONE-{agent}: {summary}"
+    direction: api | web -> lead
+  review_request:
+    description: Lead requests code review
+    format: "REVIEW-REQUEST: {description}"
+    direction: lead -> reviewer
+  review_done:
+    description: Reviewer approves changes
+    format: "REVIEW-DONE: {summary}"
+    direction: reviewer -> lead
+  complete:
+    description: All work finished
+    format: "COMPLETE: done."
+    direction: lead -> pm
+
+agents:
+  pm:
+    role: Product Manager
+    description: User-facing interface.
+    interactive: true
+    model: sonnet
+    tools: [read, bash]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [assign]
+    receives: [complete]
+    workflow:
+      - "Take user input"
+      - "Assign work to lead"
+    rules:
+      - "Do not write code"
+    commands:
+      status: "List open tickets"
+      "tell <agent> ...": "Send message to agent"
+    init:
+      default: "I'm your PM. Give me work."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  lead:
+    role: Tech Lead
+    description: Dispatches work to api and web in parallel, then gates on reviewer.
+    interactive: false
+    auto_start: true
+    model: sonnet
+    tools: [read, bash, glob, grep]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [task, review_request, complete]
+    receives: [assign, done, review_done]
+    workflow:
+      - "Pick up ready tickets"
+      - "Dispatch to api AND web simultaneously"
+      - "Wait for DONE-api and DONE-web"
+      - "Send REVIEW-REQUEST to reviewer"
+      - "Wait for REVIEW-DONE"
+      - "Send COMPLETE to pm"
+    rules:
+      - "Dispatch api and web in parallel"
+    init:
+      default: "Check for ready tickets."
+      test: "{default}"
+      issue: "Start on ticket #{issue_num}."
+    prompt_extra: ""
+
+  api:
+    role: API Developer
+    description: Implements backend API endpoints.
+    interactive: false
+    model: sonnet
+    tools: [read, edit, write, bash, glob, grep]
+    owns:
+      paths: ["api/**"]
+      never_edit: ["web/**"]
+    stack: [Python, FastAPI]
+    sends: [done]
+    receives: [task]
+    workflow:
+      - "Wait for TASK message"
+      - "Implement API changes"
+      - "Send DONE-api"
+    rules:
+      - "Only edit api/ files"
+    init:
+      default: "Event-driven. Wait for TASK messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  web:
+    role: Web Developer
+    description: Implements frontend UI.
+    interactive: false
+    model: sonnet
+    tools: [read, edit, write, bash, glob, grep]
+    owns:
+      paths: ["web/**"]
+      never_edit: ["api/**"]
+    stack: [React, TypeScript]
+    sends: [done]
+    receives: [task]
+    workflow:
+      - "Wait for TASK message"
+      - "Implement UI changes"
+      - "Send DONE-web"
+    rules:
+      - "Only edit web/ files"
+    init:
+      default: "Event-driven. Wait for TASK messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  reviewer:
+    role: Code Reviewer
+    description: Reviews code changes before merge.
+    interactive: false
+    model: sonnet
+    tools: [read, bash, glob, grep]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [review_done]
+    receives: [review_request]
+    workflow:
+      - "Wait for REVIEW-REQUEST"
+      - "Review the changes"
+      - "Send REVIEW-DONE"
+    rules:
+      - "Do not write code, only review"
+    init:
+      default: "Event-driven. Wait for REVIEW-REQUEST messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

@@ -211,10 +211,239 @@ generate_init_prompt() {
     printf '%s' "$init_text" > "$PROMPT_DIR/${agent}-init.txt"
 }
 
+# ── Tool Mapping ──
+get_allowed_tools() {
+    local agent="$1"
+    local tools_list=""
+    while IFS= read -r tool; do
+        case "$tool" in
+            read)          tools_list+="Read," ;;
+            edit)          tools_list+="Edit," ;;
+            write)         tools_list+="Write," ;;
+            bash)          tools_list+="Bash(*)," ;;
+            glob)          tools_list+="Glob," ;;
+            grep)          tools_list+="Grep," ;;
+            *)             ;;
+        esac
+    done < <(yq_get ".agents.$agent.tools[]" 2>/dev/null)
+    echo "${tools_list%,}"
+}
+
+# ── Generate send-to-agent.sh (test version — no AppleScript/ACK) ──
+generate_send_to_agent() {
+    cat > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_NAME=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+shift
+MESSAGE="$*"
+
+TRIGGER_DIR="$SCRIPT_DIR/triggers"
+if ! mkdir -p "$TRIGGER_DIR" 2>/dev/null; then
+    echo "ERROR: Failed to create trigger directory: $TRIGGER_DIR" >&2
+    exit 1
+fi
+
+TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.trigger"
+if ! printf '%s\n' "$MESSAGE" > "$TRIGGER_FILE"; then
+    echo "ERROR: Failed to write trigger file: $TRIGGER_FILE" >&2
+    exit 1
+fi
+
+if [ ! -s "$TRIGGER_FILE" ]; then
+    echo "ERROR: Trigger file is empty after write: $TRIGGER_FILE" >&2
+    exit 1
+fi
+
+case "$MESSAGE" in
+    DONE-*|Done-*)
+        touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
+        ;;
+esac
+
+AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
+PREVIEW="${MESSAGE:0:120}"
+[ ${#MESSAGE} -gt 120 ] && PREVIEW="${PREVIEW}..."
+echo "--- [$(date '+%H:%M:%S')] Message to ${AGENT_UPPER} (${#MESSAGE} chars): ${PREVIEW} ---"
+HELPER
+    chmod +x "$PROMPT_DIR/send-to-agent.sh"
+}
+
+# ── Generate Launchers ──
+generate_launcher() {
+    local agent="$1"
+    local interactive
+    interactive=$(yq_get ".agents.$agent.interactive")
+    local label
+    label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
+    local allowed_tools
+    allowed_tools=$(get_allowed_tools "$agent")
+
+    # Find the auto_start agent for DONE callbacks
+    local auto_start_agent="" auto_start_label=""
+    for _a in "${AGENTS[@]}"; do
+        if [ "$(yq_get ".agents.$_a.auto_start // false")" = "true" ]; then
+            auto_start_agent="$_a"
+            auto_start_label=$(echo "$_a" | tr '[:lower:]' '[:upper:]')
+            break
+        fi
+    done
+
+    local REPO_DIR="$WORK_DIR"
+
+    if [ "$interactive" = "true" ]; then
+        # Build agent list (non-interactive agents)
+        local _agent_list=""
+        for _a in "${AGENTS[@]}"; do
+            [ "$_a" != "$agent" ] && _agent_list+="$_a "
+        done
+        _agent_list="${_agent_list% }"
+
+        sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
+    #!/bin/bash
+    cd '${REPO_DIR}'
+    printf '\033]0;${label}\007'
+    SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
+    PROMPT_DIR='${PROMPT_DIR}'
+    TRIGGER_DIR='${PROMPT_DIR}/triggers'
+    mkdir -p "\$TRIGGER_DIR"
+
+    AGENT_LIST="${_agent_list}"
+
+    CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
+    CMD_LIST_READY="${TICKET_LIST_READY}"
+    CMD_VIEW="${TICKET_VIEW}"
+    CMD_CLAIM="${TICKET_CLAIM}"
+    CMD_COMMENT="${TICKET_COMMENT}"
+    CMD_CLOSE="${TICKET_CLOSE}"
+    CMD_CREATE="${TICKET_CREATE}"
+    CMD_LIST_STALE="${TICKET_LIST_STALE}"
+
+    # REPL
+    while true; do
+        read -r -p "PM> " INPUT || break
+        [ -z "\$INPUT" ] && continue
+        case "\$INPUT" in
+            help)
+                echo "  status | backlog | view N | close N | claim N | tell agent msg | agents | ai prompt | quit"
+                ;;
+            status)
+                eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "(no tickets)"
+                ;;
+            agents|team)
+                for _a in \$AGENT_LIST; do
+                    if [ -f "\$TRIGGER_DIR/\${_a}.msg" ]; then
+                        printf "  %-14s working\n" "\$_a"
+                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ]; then
+                        printf "  %-14s pending\n" "\$_a"
+                    elif [ -f "\$TRIGGER_DIR/\${_a}.done-sent" ]; then
+                        printf "  %-14s done\n" "\$_a"
+                    else
+                        printf "  %-14s idle\n" "\$_a"
+                    fi
+                done
+                ;;
+            tell\ *)
+                AGENT=\$(echo "\$INPUT" | awk '{print tolower(\$2)}')
+                if ! echo " \$AGENT_LIST " | grep -q " \$AGENT "; then
+                    echo "  Unknown agent: \$AGENT"
+                    echo "  Available: \$AGENT_LIST"
+                else
+                    MSG=\$(echo "\$INPUT" | sed 's/^tell *[^ ]* *//')
+                    AGENT_UPPER=\$(echo "\$AGENT" | tr '[:lower:]' '[:upper:]')
+                    '\${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
+                fi
+                ;;
+            ai\ *)
+                PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
+                echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}"
+                ;;
+            quit|exit) break ;;
+            *) echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" ;;
+        esac
+    done
+LAUNCHER
+    else
+        local starts_immediately
+        starts_immediately=$(yq_get ".agents.$agent.auto_start // false")
+
+        if [ "$starts_immediately" = "true" ]; then
+            sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
+    #!/bin/bash
+    cd '${REPO_DIR}'
+    printf '\033]0;${label}\007'
+    SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
+    INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
+    TRIGGER_DIR='${PROMPT_DIR}/triggers'
+    mkdir -p "\$TRIGGER_DIR"
+    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
+    echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+    while true; do
+        if [ -f "\$TRIGGER_FILE" ]; then
+            PENDING_MSG=\$(cat "\$TRIGGER_FILE")
+            rm -f "\$TRIGGER_FILE"
+            echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
+            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+        else
+            echo "working \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+        fi
+        echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+        COMPLETE_MARKER="\$TRIGGER_DIR/.work-done"
+        if [ -f "\$COMPLETE_MARKER" ]; then
+            '${PROMPT_DIR}/send-to-agent.sh' PM "COMPLETE: All tasks finished (auto-notify)"
+            rm -f "\$COMPLETE_MARKER"
+        fi
+        sleep 5
+    done
+LAUNCHER
+        else
+            sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
+    #!/bin/bash
+    cd '${REPO_DIR}'
+    printf '\033]0;${label}\007'
+    SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
+    TRIGGER_DIR='${PROMPT_DIR}/triggers'
+    mkdir -p "\$TRIGGER_DIR"
+    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
+    echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+    # Event-driven loop: wait for trigger file, start Claude with its contents
+    while true; do
+        if [ -f "\$TRIGGER_FILE" ]; then
+            WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
+            if ! mv "\$TRIGGER_FILE" "\$WORK_FILE" 2>/dev/null; then
+                continue
+            fi
+            printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
+            if [ -s "\$WORK_FILE" ]; then
+                TASK_PREVIEW=\$(head -c 50 "\$WORK_FILE")
+                echo "working \$(date +%s) \$TASK_PREVIEW" > "\$TRIGGER_DIR/${agent}.state"
+                rm -f "\$TRIGGER_DIR/${agent}.done-sent"
+                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                if [ ! -f "\$TRIGGER_DIR/${agent}.done-sent" ]; then
+                    '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
+                fi
+                rm -f "\$TRIGGER_DIR/${agent}.done-sent"
+                echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+            fi
+            rm -f "\$WORK_FILE"
+        else
+            sleep 1
+        fi
+    done
+LAUNCHER
+        fi
+    fi
+    chmod +x "$PROMPT_DIR/run-${agent}.sh"
+}
+
 # ── Generate All ──
+generate_send_to_agent
+
 for agent in "${AGENTS[@]}"; do
     generate_system_prompt "$agent"
     generate_init_prompt "$agent"
+    generate_launcher "$agent"
 done
 
-echo "Generated prompts for: ${AGENTS[*]}"
+echo "Generated prompts and launchers for: ${AGENTS[*]}"
