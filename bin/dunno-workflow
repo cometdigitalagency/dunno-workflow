@@ -2098,14 +2098,16 @@ LOGSCRIPT
             ((widx++))
         done
     
-        # Launch scripts in each pane
+        # Launch scripts in each pane (delay lets zsh finish init before typing)
         as+="\n        -- Launch agents\n"
+        as+="        delay 1\n"
         as+="        tell current session\n"
         as+="            write text \"${PROMPT_DIR}/run-${INTERACTIVE_AGENT}.sh\"\n"
         as+="        end tell\n"
-    
+
         for i in "${!WORKER_AGENTS[@]}"; do
             local w="${WORKER_AGENTS[$i]}"
+            as+="        delay 0.5\n"
             if [ "$i" = "0" ]; then
                 as+="        tell worker0Session\n"
             elif [ "$i" = "1" ]; then
@@ -2116,8 +2118,9 @@ LOGSCRIPT
             as+="            write text \"${PROMPT_DIR}/run-${w}.sh\"\n"
             as+="        end tell\n"
         done
-    
+
         if [ "$DEBUG_MODE" = true ] && [ "$NUM_WORKERS" -ge 2 ]; then
+            as+="        delay 0.5\n"
             as+="        tell logsSession\n"
             as+="            write text \"${PROMPT_DIR}/run-logs.sh\"\n"
             as+="        end tell\n"
