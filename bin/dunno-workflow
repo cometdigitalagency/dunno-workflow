@@ -459,7 +459,7 @@ analyze_session_crashes() {
 analyze_permission_blocks() {
     local log_dir="$1"
     # Match actual tool permission denials from Claude CLI, not conversational mentions
-    local perm_pattern="tool use was blocked\|permission denied.*tool\|not allowed to use\|Tool .* is not permitted\|--allowedTools\|requires permission\|User denied tool"
+    local perm_pattern="tool use was blocked\|not allowed to use\|Tool .* is not permitted\|User denied tool"
     for logfile in "$log_dir"/*.log; do
         local agent
         agent=$(basename "$logfile" .log)
@@ -1572,10 +1572,16 @@ LAUNCHER
         if [ -f "\$TRIGGER_FILE" ]; then
             # Move trigger to a work file so new messages don't collide
             WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
-            if ! mv "\$TRIGGER_FILE" "\$WORK_FILE" 2>/dev/null; then
-                echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file vanished before pickup (race condition) ---"
-                continue
-            fi
+            MOVE_RETRIES=0
+            while ! mv "\$TRIGGER_FILE" "\$WORK_FILE" 2>/dev/null; do
+                MOVE_RETRIES=\$((MOVE_RETRIES + 1))
+                if [ \$MOVE_RETRIES -ge 5 ]; then
+                    echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file vanished after 5 retries (race condition) ---"
+                    continue 2
+                fi
+                echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file not ready, retry \$MOVE_RETRIES/5... ---"
+                sleep 1
+            done
 
             # ACK: confirm message pickup so sender knows we got it
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
