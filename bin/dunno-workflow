@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# dunno-workflow — Launch Claude Code agent team in iTerm2 split panes
+# dunno-workflow — Launch AI agent teams in iTerm2 split panes
 #
 # Reads workflow.yaml from the current directory to configure agents, events,
 # ticket sources, and layout. Generates prompts, launchers, and iTerm2 panes.
@@ -16,11 +16,12 @@ VERSION="0.3.8"
 # ==================== Commands ====================
 
 show_help() {
-    echo "dunno-workflow v${VERSION} — Declarative Claude Code agent teams"
+    echo "dunno-workflow v${VERSION} — Declarative AI agent teams"
     echo ""
     echo "Usage:"
     echo "  dunno-workflow init               Create workflow.yaml in current directory"
-    echo "  dunno-workflow start [options]     Launch agent team in iTerm2"
+    echo "  dunno-workflow start [options]    Launch agent team in iTerm2"
+    echo "  dunno-workflow login [provider]   Log in to Claude or Codex CLI"
     echo "  dunno-workflow validate            Validate workflow.yaml (schema + event graph)"
     echo "  dunno-workflow analyze [options]   Analyze logs for agent failures, create issues"
     echo "  dunno-workflow stop                Stop all running agent sessions"
@@ -61,6 +62,90 @@ cmd_init() {
     if [ -f "$tpl/tickets/TEMPLATE.md" ]; then cp "$tpl/tickets/TEMPLATE.md" ./tickets/TEMPLATE.md; fi
     echo "Created workflow.yaml and tickets/TEMPLATE.md"
     echo "Edit workflow.yaml to configure your agent team, then run: dunno-workflow start"
+}
+
+normalize_provider() {
+    local provider="$1"
+    [ "$provider" = "null" ] && provider=""
+    provider=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+    printf '%s' "$provider"
+}
+
+workflow_provider_from_file() {
+    local workflow_file="$1"
+    local provider
+    provider=$(yq '.runtime.provider // "claude"' "$workflow_file" 2>/dev/null)
+    provider=$(normalize_provider "$provider")
+    [ -z "$provider" ] && provider="claude"
+    printf '%s' "$provider"
+}
+
+agent_provider_from_file() {
+    local workflow_file="$1" agent="$2"
+    local provider
+    provider=$(yq ".agents.$agent.provider // \"\"" "$workflow_file" 2>/dev/null)
+    provider=$(normalize_provider "$provider")
+    printf '%s' "$provider"
+}
+
+is_supported_provider() {
+    case "$1" in
+        claude|codex) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+provider_cli_name() {
+    case "$1" in
+        claude) echo "claude" ;;
+        codex) echo "codex" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+ensure_provider_installed() {
+    local provider="$1"
+    local cli
+    cli=$(provider_cli_name "$provider")
+    if ! command -v "$cli" >/dev/null 2>&1; then
+        echo "ERROR: ${cli} CLI is required for provider '${provider}'"
+        exit 1
+    fi
+}
+
+run_provider_login() {
+    local provider="$1"
+    ensure_provider_installed "$provider"
+    case "$provider" in
+        claude) claude auth login ;;
+        codex) codex login ;;
+        *)
+            echo "ERROR: Unsupported provider '${provider}'"
+            exit 1 ;;
+    esac
+}
+
+cmd_login() {
+    local provider="${1:-}"
+
+    if [ -z "$provider" ] && [ -f "workflow.yaml" ] && command -v yq >/dev/null 2>&1; then
+        provider=$(workflow_provider_from_file "workflow.yaml")
+    fi
+    provider=$(normalize_provider "$provider")
+    [ -z "$provider" ] && provider="claude"
+
+    case "$provider" in
+        all)
+            run_provider_login "claude"
+            run_provider_login "codex"
+            ;;
+        claude|codex)
+            run_provider_login "$provider"
+            ;;
+        *)
+            echo "ERROR: Unsupported provider '${provider}'. Use claude, codex, or all."
+            exit 1 ;;
+    esac
 }
 
 # ==================== Validation Helpers ====================
@@ -334,8 +419,28 @@ cmd_validate() {
     # Phase 1: Schema checks
     [ "$(yq '.project.name // ""' workflow.yaml)" = "" ] && echo "ERROR: project.name required" && ((errors++))
     [ "$(yq '.tickets.source // ""' workflow.yaml)" = "" ] && echo "ERROR: tickets.source required" && ((errors++))
+    local workflow_provider
+    workflow_provider=$(workflow_provider_from_file "workflow.yaml")
+    if ! is_supported_provider "$workflow_provider"; then
+        echo "ERROR: runtime.provider must be one of: claude, codex"
+        ((errors++))
+    fi
     local ic; ic=$(yq '[.agents[] | select(.interactive == true)] | length' workflow.yaml)
     [ "$ic" -ne 1 ] && echo "ERROR: exactly one agent must have interactive: true (found $ic)" && ((errors++))
+    local agent agent_provider
+    for agent in $(yq '.agents | keys | .[]' workflow.yaml); do
+        agent_provider=$(agent_provider_from_file "workflow.yaml" "$agent")
+        [ -z "$agent_provider" ] && continue
+        if ! is_supported_provider "$agent_provider"; then
+            echo "ERROR: Agent '$agent' has unsupported provider '$agent_provider'"
+            ((errors++))
+            continue
+        fi
+        if [ "$agent_provider" != "$workflow_provider" ]; then
+            echo "ERROR: Mixed providers are not supported yet. Agent '$agent' uses '$agent_provider' but runtime.provider is '$workflow_provider'"
+            ((errors++))
+        fi
+    done
 
     # Phase 2: Graph checks (only if events or agent event refs exist)
     local has_events has_agent_events
@@ -361,6 +466,7 @@ cmd_validate() {
         echo "workflow.yaml is valid"
         echo "  Project: $(yq '.project.name' workflow.yaml)"
         echo "  Ticket source: $(yq '.tickets.source' workflow.yaml)"
+        echo "  Provider: ${workflow_provider}"
         echo "  Agents: $(yq '.agents | keys | join(", ")' workflow.yaml)"
         [ "$has_events" -gt 0 ] && echo "  Events: $(yq '.events | keys | join(", ")' workflow.yaml)"
         [ "$warnings" -gt 0 ] && echo "  $warnings warning(s)"
@@ -834,6 +940,13 @@ cmd_start() {
     PROJECT_NAME=$(yq_get '.project.name')
     REPO_NAME=$(yq_get '.project.repo')
     TICKET_SOURCE=$(yq_get '.tickets.source')
+    WORKFLOW_PROVIDER=$(normalize_provider "$(yq_get '.runtime.provider // "claude"')")
+    [ -z "$WORKFLOW_PROVIDER" ] && WORKFLOW_PROVIDER="claude"
+    if ! is_supported_provider "$WORKFLOW_PROVIDER"; then
+        echo "ERROR: Unsupported runtime.provider '${WORKFLOW_PROVIDER}'. Use claude or codex."
+        exit 1
+    fi
+    ensure_provider_installed "$WORKFLOW_PROVIDER"
     
     # Read agent names (preserving YAML key order)
     AGENTS=()
@@ -849,6 +962,11 @@ cmd_start() {
             INTERACTIVE_AGENT="$agent"
         else
             WORKER_AGENTS+=("$agent")
+        fi
+        agent_provider=$(normalize_provider "$(yq_get ".agents.$agent.provider // \"\"")")
+        if [ -n "$agent_provider" ] && [ "$agent_provider" != "$WORKFLOW_PROVIDER" ]; then
+            echo "ERROR: Mixed providers are not supported yet. Agent '$agent' uses '$agent_provider' but runtime.provider is '$WORKFLOW_PROVIDER'"
+            exit 1
         fi
     done
     
@@ -1278,7 +1396,7 @@ HELPER
     }
     
     # ==================== Generate Launcher Scripts ====================
-    
+
     # Map workflow.yaml tool names to Claude Code --allowedTools names
     get_allowed_tools() {
         local agent="$1"
@@ -1298,19 +1416,27 @@ HELPER
                 *)             tools_list+="${tool}," ;;
             esac
         done < <(yq_get ".agents.$agent.tools[]" 2>/dev/null)
-        # Remove trailing comma
         echo "${tools_list%,}"
+    }
+
+    get_agent_provider() {
+        local agent="$1"
+        local provider
+        provider=$(normalize_provider "$(yq_get ".agents.$agent.provider // \"${WORKFLOW_PROVIDER}\"")")
+        [ -z "$provider" ] && provider="$WORKFLOW_PROVIDER"
+        echo "$provider"
     }
 
     generate_launcher() {
         local agent="$1"
-        local interactive
+        local interactive provider model
         interactive=$(yq_get ".agents.$agent.interactive")
+        provider=$(get_agent_provider "$agent")
+        model=$(yq_get ".agents.$agent.model // \"\"")
         local label
         label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-        local allowed_tools auto_start_agent
+        local allowed_tools auto_start_agent auto_start_label
         allowed_tools=$(get_allowed_tools "$agent")
-        # Find the auto_start agent (architect) for DONE callbacks
         auto_start_agent=""
         auto_start_label=""
         for _a in "${AGENTS[@]}"; do
@@ -1320,29 +1446,46 @@ HELPER
                 break
             fi
         done
-    
+
         if [ "$interactive" = "true" ]; then
-            # Build list of non-interactive agents for the REPL
             local _agent_list=""
             for _a in "${AGENTS[@]}"; do
                 [ "$_a" != "$agent" ] && _agent_list+="$_a "
             done
-            _agent_list="${_agent_list% }"  # trim trailing space
+            _agent_list="${_agent_list% }"
 
-            # Interactive agent (PM) — bash REPL with LLM fallback
             sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
     cd '${REPO_DIR}'
     printf '\033]0;${label}\007'
+    REPO_DIR='${REPO_DIR}'
+    PROVIDER='${provider}'
+    MODEL='${model}'
+    AGENT_NAME='${agent}'
+    ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     PROMPT_DIR='${PROMPT_DIR}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
 
-    # Agent list (non-interactive agents from workflow.yaml)
-    AGENT_LIST="${_agent_list}"
+    _provider_exec_prompt() {
+        local _prompt="\$1"
+        if [ "\$PROVIDER" = "claude" ]; then
+            if [ -n "\$MODEL" ]; then
+                echo "\$_prompt" | claude -p --model "\$MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME"
+            else
+                echo "\$_prompt" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME"
+            fi
+        else
+            if [ -n "\$MODEL" ]; then
+                printf '%s\n\n%s\n' "\$SYSTEM_PROMPT" "\$_prompt" | codex exec --sandbox workspace-write -C "\$REPO_DIR" -m "\$MODEL" -
+            else
+                printf '%s\n\n%s\n' "\$SYSTEM_PROMPT" "\$_prompt" | codex exec --sandbox workspace-write -C "\$REPO_DIR" -
+            fi
+        fi
+    }
 
-    # Ticket commands (generated from workflow.yaml tickets.source)
+    AGENT_LIST="${_agent_list}"
     CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
     CMD_LIST_READY="${TICKET_LIST_READY}"
     CMD_VIEW="${TICKET_VIEW}"
@@ -1352,10 +1495,10 @@ HELPER
     CMD_CREATE="${TICKET_CREATE}"
     CMD_LIST_STALE="${TICKET_LIST_STALE}"
 
-    # Banner
     echo "╔══════════════════════════════════════╗"
     echo "║       ${label}                       ║"
     echo "╠══════════════════════════════════════╣"
+    echo "║  Provider: ${provider}               ║"
     echo "║  Commands:                           ║"
     echo "║  • status                            ║"
     echo "║  • backlog                           ║"
@@ -1366,29 +1509,25 @@ HELPER
     echo "║  • tell <agent> <msg>                ║"
     echo "║  • agents                            ║"
     echo "║  • stale                             ║"
-    echo "║  • ai <prompt>  (uses LLM)           ║"
+    echo "║  • ai <prompt>  (uses provider)      ║"
     echo "║  • help                              ║"
     echo "╚══════════════════════════════════════╝"
     echo ""
 
-    # Background: watch for incoming messages (COMPLETE, etc.)
     (while true; do
         _PM_MSG=""
-        # Collect per-sender trigger files
         for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
             [ -f "\$_tf" ] || continue
             _PM_MSG="\${_PM_MSG}\$(cat "\$_tf")
 "
             rm -f "\$_tf"
         done
-        # Legacy single trigger file (backward compat)
         if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
             _PM_MSG="\${_PM_MSG}\$(cat "\$TRIGGER_DIR/${agent}.trigger")
 "
             rm -f "\$TRIGGER_DIR/${agent}.trigger"
         fi
         if [ -n "\$_PM_MSG" ]; then
-            # ACK the pickup
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
             echo ""
             echo "═══════════════════════════════════════"
@@ -1404,14 +1543,12 @@ HELPER
     BG_PID=\$!
     trap "kill \$BG_PID 2>/dev/null" EXIT
 
-    # Pause helper — press any key to return to PM prompt
     _pm_pause() {
         echo ""
         echo "  (press Enter to continue)"
         read -r -s -n 1 2>/dev/null || true
     }
 
-    # REPL
     while true; do
         read -r -p "PM> " INPUT || { sleep 1; continue; }
         [ -z "\$INPUT" ] && continue
@@ -1428,7 +1565,7 @@ HELPER
                 echo "  tell <agent> <msg>  Send message to an agent"
                 echo "  agents              Show agent statuses"
                 echo "  stale               List stale in-progress tickets"
-                echo "  ai <prompt>         Ask Claude (uses LLM tokens)"
+                echo "  ai <prompt>         Ask the configured provider"
                 echo "  quit                Exit PM"
                 echo ""
                 ;;
@@ -1506,7 +1643,7 @@ HELPER
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
                 echo ""
-                echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                _provider_exec_prompt "\$PROMPT"
                 _pm_pause
                 ;;
             quit|exit)
@@ -1514,9 +1651,8 @@ HELPER
                 break
                 ;;
             *)
-                # Unrecognized — fall back to LLM
                 echo ""
-                echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                _provider_exec_prompt "\$INPUT"
                 _pm_pause
                 ;;
         esac
@@ -1525,38 +1661,55 @@ LAUNCHER
         else
             local starts_immediately
             starts_immediately=$(yq_get ".agents.$agent.auto_start // false")
-    
+
             if [ "$starts_immediately" = "true" ]; then
-                # Architect — starts immediately, restarts if session ends
                 sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
     cd '${REPO_DIR}'
     printf '\033]0;${label}\007'
+    REPO_DIR='${REPO_DIR}'
+    PROVIDER='${provider}'
+    MODEL='${model}'
+    AGENT_NAME='${agent}'
+    ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
-    
+
+    _provider_run_prompt() {
+        local _prompt="\$1"
+        if [ "\$PROVIDER" = "claude" ]; then
+            if [ -n "\$MODEL" ]; then
+                claude --model "\$MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME" "\$_prompt"
+            else
+                claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME" "\$_prompt"
+            fi
+        else
+            if [ -n "\$MODEL" ]; then
+                printf '%s\n\n%s\n' "\$SYSTEM_PROMPT" "\$_prompt" | codex exec --sandbox workspace-write -C "\$REPO_DIR" -m "\$MODEL" -
+            else
+                printf '%s\n\n%s\n' "\$SYSTEM_PROMPT" "\$_prompt" | codex exec --sandbox workspace-write -C "\$REPO_DIR" -
+            fi
+        fi
+    }
+
     echo "╔══════════════════════════════════════╗"
     echo "║  ${label} agent"
-    echo "║  Starting up..."
+    echo "║  Starting up with ${provider}..."
     echo "╚══════════════════════════════════════╝"
     echo ""
-    
+
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
-
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
 
-    # Collect all per-sender trigger files (and legacy single file) into one message
     _collect_triggers() {
         local _collected=""
-        # Per-sender trigger files
         for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
             [ -f "\$_tf" ] || continue
             _collected="\${_collected}\$(cat "\$_tf")
 "
             rm -f "\$_tf"
         done
-        # Legacy single trigger file (backward compat)
         if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
             _collected="\${_collected}\$(cat "\$TRIGGER_DIR/${agent}.trigger")
 "
@@ -1566,44 +1719,62 @@ LAUNCHER
     }
 
     while true; do
-        # Check for pending trigger files (messages arrived while session was down)
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            _provider_run_prompt "\$PENDING_MSG"
         else
             echo "working \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+            _provider_run_prompt "\$INIT_PROMPT"
         fi
         echo ""
         echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
         echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
-        # Auto-notify: guarantee COMPLETE reaches PM if session ended after work was done
         COMPLETE_MARKER="\$TRIGGER_DIR/.work-done"
         if [ -f "\$COMPLETE_MARKER" ]; then
             '${PROMPT_DIR}/send-to-agent.sh' PM "COMPLETE: All tasks finished (auto-notify)"
             echo "--- [\$(date '+%H:%M:%S')] Auto-sent COMPLETE to PM ---"
             rm -f "\$COMPLETE_MARKER"
         fi
-        # Check for trigger files that arrived while session was active
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             echo "--- [\$(date '+%H:%M:%S')] Found pending message during post-session check (\${#PENDING_MSG} chars) ---"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            _provider_run_prompt "\$PENDING_MSG"
         fi
         sleep 5
     done
 LAUNCHER
             else
-                # Worker agent — waits for a trigger file, then starts Claude with its contents
                 sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
     cd '${REPO_DIR}'
     printf '\033]0;${label}\007'
+    REPO_DIR='${REPO_DIR}'
+    PROVIDER='${provider}'
+    MODEL='${model}'
+    AGENT_NAME='${agent}'
+    ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+
+    _provider_run_file() {
+        local _file="\$1"
+        if [ "\$PROVIDER" = "claude" ]; then
+            if [ -n "\$MODEL" ]; then
+                cat "\$_file" | claude -p --model "\$MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME"
+            else
+                cat "\$_file" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME"
+            fi
+        else
+            if [ -n "\$MODEL" ]; then
+                { printf '%s\n\n' "\$SYSTEM_PROMPT"; cat "\$_file"; } | codex exec --sandbox workspace-write -C "\$REPO_DIR" -m "\$MODEL" -
+            else
+                { printf '%s\n\n' "\$SYSTEM_PROMPT"; cat "\$_file"; } | codex exec --sandbox workspace-write -C "\$REPO_DIR" -
+            fi
+        fi
+    }
 
     echo "╔══════════════════════════════════════╗"
     echo "║  ${label} agent"
@@ -1613,7 +1784,6 @@ LAUNCHER
 
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
 
-    # Collect all per-sender trigger files (and legacy single file) into work file
     _collect_worker_triggers() {
         local _work="\$TRIGGER_DIR/${agent}.msg"
         local _found=false
@@ -1625,7 +1795,6 @@ LAUNCHER
             rm -f "\$_tf"
             _found=true
         done
-        # Legacy single trigger file (backward compat)
         if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
             cat "\$TRIGGER_DIR/${agent}.trigger" >> "\$_work"
             printf '\n' >> "\$_work"
@@ -1639,12 +1808,10 @@ LAUNCHER
         return 1
     }
 
-    # Event-driven loop: wait for trigger files, start Claude with their contents
+    # Event-driven loop: wait for trigger files, start provider with their contents
     while true; do
         if _collect_worker_triggers; then
             WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
-
-            # ACK: confirm message pickup so sender knows we got it
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
 
             if [ -s "\$WORK_FILE" ]; then
@@ -1655,12 +1822,9 @@ LAUNCHER
                 echo "--- [\$(date '+%H:%M:%S')] Received message (\$(wc -c < "\$WORK_FILE" | tr -d ' ') bytes) ---"
                 echo "    \${PREVIEW:0:200}..."
                 echo ""
-                # Clean done-sent marker from previous run
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
-                # Pipe from file to avoid CLI argument length limits on long messages
-                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                _provider_run_file "\$WORK_FILE"
                 echo ""
-                # Auto-notify: only send DONE if the agent didn't already send it
                 if [ ! -f "\$TRIGGER_DIR/${agent}.done-sent" ]; then
                     '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
                     echo "--- [\$(date '+%H:%M:%S')] Auto-sent DONE-${agent} to ${auto_start_agent} ---"
@@ -1690,6 +1854,7 @@ LAUNCHER
     echo "Reading workflow.yaml..."
     echo "  Project: ${PROJECT_NAME}"
     echo "  Ticket source: ${TICKET_SOURCE}"
+    echo "  Provider: ${WORKFLOW_PROVIDER}"
     echo "  Agents: ${AGENTS[*]}"
     echo ""
     
@@ -2208,6 +2373,7 @@ PMSCRIPT
 case "${1:-}" in
     start)          shift; cmd_start "$@" ;;
     init)           cmd_init ;;
+    login)          shift; cmd_login "$@" ;;
     validate)       cmd_validate ;;
     analyze)        shift; cmd_analyze "$@" ;;
     stop)           cmd_stop ;;

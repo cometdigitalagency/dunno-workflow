@@ -28,6 +28,13 @@ load test_helper
     [[ "$output" == *"github"* ]]
 }
 
+@test "validate: codex provider passes" {
+    use_fixture "minimal-codex.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Provider: codex"* ]]
+}
+
 @test "validate: shows project name in output" {
     use_fixture "dunno-agents.yaml"
     run run_in_dir "$TEST_WORK_DIR" validate
@@ -81,6 +88,13 @@ load test_helper
     run run_in_dir "$TEST_WORK_DIR" validate
     [ "$status" -ne 0 ]
     [[ "$output" == *"exactly one agent must have interactive: true"* ]]
+}
+
+@test "validate: rejects mixed providers" {
+    use_fixture "mixed-provider.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Mixed providers are not supported yet"* ]]
 }
 
 @test "validate: reports error count" {

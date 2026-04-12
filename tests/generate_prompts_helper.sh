@@ -1,10 +1,5 @@
 #!/bin/bash
 # generate_prompts_helper.sh — runs prompt generation without launching iTerm2
-#
-# Usage: ./generate_prompts_helper.sh <work_dir> [--test] [--issue N]
-#
-# Generates .team-prompts/ in work_dir but skips iTerm2 launch, cleanup,
-# and GitHub label creation.
 
 set -e
 
@@ -31,30 +26,22 @@ if [ ! -f "$WORKFLOW_FILE" ]; then
 fi
 
 yq_get() { yq "$1" "$WORKFLOW_FILE"; }
+normalize_provider() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 PROJECT_NAME=$(yq_get '.project.name')
 REPO_NAME=$(yq_get '.project.repo // ""')
 TICKET_SOURCE=$(yq_get '.tickets.source')
+WORKFLOW_PROVIDER=$(normalize_provider "$(yq_get '.runtime.provider // "claude"')")
+[ -z "$WORKFLOW_PROVIDER" ] && WORKFLOW_PROVIDER="claude"
 
 AGENTS=()
 while IFS= read -r agent; do
     AGENTS+=("$agent")
 done < <(yq_get '.agents | keys | .[]')
 
-INTERACTIVE_AGENT=""
-WORKER_AGENTS=()
-for agent in "${AGENTS[@]}"; do
-    if [ "$(yq_get ".agents.$agent.interactive")" = "true" ]; then
-        INTERACTIVE_AGENT="$agent"
-    else
-        WORKER_AGENTS+=("$agent")
-    fi
-done
-
 PROMPT_DIR="${WORK_DIR}/.team-prompts"
 mkdir -p "$PROMPT_DIR"
 
-# ── Ticket Source Commands ──
 case "$TICKET_SOURCE" in
     github)
         gh_repo=$(yq_get '.tickets.github.repo // .project.repo')
@@ -93,7 +80,6 @@ case "$TICKET_SOURCE" in
         ;;
 esac
 
-# ── Generate System Prompts ──
 generate_system_prompt() {
     local agent="$1"
     local role description interactive
@@ -103,7 +89,6 @@ generate_system_prompt() {
 
     local prompt=""
     prompt+="You are the ${role} for the ${PROJECT_NAME} platform. ${description}\n\n"
-
     prompt+="## YOUR WORKFLOW\n"
     local step_num=1
     while IFS= read -r step; do
@@ -117,7 +102,6 @@ generate_system_prompt() {
     prompt+="You can send messages to any agent by running bash commands:\n"
     for other in "${AGENTS[@]}"; do
         if [ "$other" != "$agent" ]; then
-            local other_upper
             other_upper=$(echo "$other" | tr '[:lower:]' '[:upper:]')
             prompt+="- Send message to ${other}: bash -c \"'${PROMPT_DIR}/send-to-agent.sh' ${other_upper} 'your message here'\"\n"
         fi
@@ -135,7 +119,6 @@ generate_system_prompt() {
     prompt+="- List stale in-progress tickets: ${TICKET_LIST_STALE}\n"
     prompt+="\n"
 
-    local rules_count
     rules_count=$(yq_get ".agents.$agent.rules | length")
     if [ "$rules_count" != "0" ]; then
         prompt+="## RULES\n"
@@ -145,7 +128,6 @@ generate_system_prompt() {
         prompt+="\n"
     fi
 
-    local owns_count never_count
     owns_count=$(yq_get ".agents.$agent.owns.paths | length")
     never_count=$(yq_get ".agents.$agent.owns.never_edit | length")
     if [ "$owns_count" != "0" ] || [ "$never_count" != "0" ]; then
@@ -163,20 +145,6 @@ generate_system_prompt() {
         prompt+="\n"
     fi
 
-    local cmds_count
-    cmds_count=$(yq_get ".agents.$agent.commands // {} | length")
-    if [ "$cmds_count" != "0" ]; then
-        prompt+="## COMMANDS (when the user says these)\n"
-        while IFS= read -r line; do
-            local key="${line%%=*}"
-            local val="${line#*=}"
-            val="${val//\{repo\}/$REPO_NAME}"
-            prompt+="- \"${key}\" → ${val}\n"
-        done < <(yq_get ".agents.$agent.commands // {} | to_entries | .[] | .key + \"=\" + .value")
-        prompt+="\n"
-    fi
-
-    local extra
     extra=$(yq_get ".agents.$agent.prompt_extra // \"\"")
     if [ -n "$extra" ] && [ "$extra" != "\"\"" ] && [ "$extra" != "" ]; then
         prompt+="\n${extra}\n"
@@ -191,7 +159,6 @@ generate_system_prompt() {
     printf '%b' "$prompt" > "$PROMPT_DIR/${agent}-system.txt"
 }
 
-# ── Generate Init Prompts ──
 generate_init_prompt() {
     local agent="$1"
     local mode="default"
@@ -200,18 +167,14 @@ generate_init_prompt() {
 
     local init_text
     init_text=$(yq_get ".agents.$agent.init.$mode // .agents.$agent.init.default")
-
     if [ "$init_text" = "{default}" ]; then
         init_text=$(yq_get ".agents.$agent.init.default")
     fi
-
     init_text="${init_text//\{issue_num\}/$ISSUE_NUM}"
     init_text="${init_text//\{repo\}/$REPO_NAME}"
-
     printf '%s' "$init_text" > "$PROMPT_DIR/${agent}-init.txt"
 }
 
-# ── Tool Mapping ──
 get_allowed_tools() {
     local agent="$1"
     local tools_list=""
@@ -229,7 +192,14 @@ get_allowed_tools() {
     echo "${tools_list%,}"
 }
 
-# ── Generate send-to-agent.sh (test version — no AppleScript/ACK) ──
+get_agent_provider() {
+    local agent="$1"
+    local provider
+    provider=$(normalize_provider "$(yq_get ".agents.$agent.provider // \"${WORKFLOW_PROVIDER}\"")")
+    [ -z "$provider" ] && provider="$WORKFLOW_PROVIDER"
+    echo "$provider"
+}
+
 generate_send_to_agent() {
     cat > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
 #!/bin/bash
@@ -244,7 +214,6 @@ if ! mkdir -p "$TRIGGER_DIR" 2>/dev/null; then
     exit 1
 fi
 
-# Per-sender trigger files to prevent race conditions.
 case "$MESSAGE" in
     DONE-*|Done-*)
         SENDER=$(echo "$MESSAGE" | sed 's/^[Dd][Oo][Nn][Ee]-\([^:]*\).*/\1/' | tr '[:upper:]' '[:lower:]')
@@ -266,27 +235,21 @@ if [ ! -s "$TRIGGER_FILE" ]; then
     echo "ERROR: Trigger file is empty after write: $TRIGGER_FILE" >&2
     exit 1
 fi
-
-AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
-PREVIEW="${MESSAGE:0:120}"
-[ ${#MESSAGE} -gt 120 ] && PREVIEW="${PREVIEW}..."
-echo "--- [$(date '+%H:%M:%S')] Message to ${AGENT_UPPER} (${#MESSAGE} chars): ${PREVIEW} ---"
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
 }
 
-# ── Generate Launchers ──
 generate_launcher() {
     local agent="$1"
-    local interactive
+    local interactive provider model
     interactive=$(yq_get ".agents.$agent.interactive")
-    local label
+    provider=$(get_agent_provider "$agent")
+    model=$(yq_get ".agents.$agent.model // \"\"")
     label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-    local allowed_tools
     allowed_tools=$(get_allowed_tools "$agent")
 
-    # Find the auto_start agent for DONE callbacks
-    local auto_start_agent="" auto_start_label=""
+    auto_start_agent=""
+    auto_start_label=""
     for _a in "${AGENTS[@]}"; do
         if [ "$(yq_get ".agents.$_a.auto_start // false")" = "true" ]; then
             auto_start_agent="$_a"
@@ -295,10 +258,7 @@ generate_launcher() {
         fi
     done
 
-    local REPO_DIR="$WORK_DIR"
-
     if [ "$interactive" = "true" ]; then
-        # Build agent list (non-interactive agents)
         local _agent_list=""
         for _a in "${AGENTS[@]}"; do
             [ "$_a" != "$agent" ] && _agent_list+="$_a "
@@ -307,15 +267,15 @@ generate_launcher() {
 
         sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
-    cd '${REPO_DIR}'
-    printf '\033]0;${label}\007'
+    cd '${WORK_DIR}'
+    PROVIDER='${provider}'
+    MODEL='${model}'
+    AGENT_NAME='${agent}'
+    REPO_DIR='${WORK_DIR}'
+    ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
-    PROMPT_DIR='${PROMPT_DIR}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
-    mkdir -p "\$TRIGGER_DIR"
-
     AGENT_LIST="${_agent_list}"
-
     CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
     CMD_LIST_READY="${TICKET_LIST_READY}"
     CMD_VIEW="${TICKET_VIEW}"
@@ -325,7 +285,15 @@ generate_launcher() {
     CMD_CREATE="${TICKET_CREATE}"
     CMD_LIST_STALE="${TICKET_LIST_STALE}"
 
-    # REPL
+    _provider_exec_prompt() {
+        local _prompt="\$1"
+        if [ "\$PROVIDER" = "claude" ]; then
+            echo "\$_prompt" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS"
+        else
+            printf '%s\n\n%s\n' "\$SYSTEM_PROMPT" "\$_prompt" | codex exec --sandbox workspace-write -C "\$REPO_DIR" -
+        fi
+    }
+
     while true; do
         read -r -p "PM> " INPUT || break
         [ -z "\$INPUT" ] && continue
@@ -357,32 +325,43 @@ generate_launcher() {
                 else
                     MSG=\$(echo "\$INPUT" | sed 's/^tell *[^ ]* *//')
                     AGENT_UPPER=\$(echo "\$AGENT" | tr '[:lower:]' '[:upper:]')
-                    '\${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
+                    '${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
                 fi
                 ;;
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
-                echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}"
+                _provider_exec_prompt "\$PROMPT"
                 ;;
             quit|exit) break ;;
-            *) echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" ;;
+            *) _provider_exec_prompt "\$INPUT" ;;
         esac
     done
 LAUNCHER
     else
-        local starts_immediately
         starts_immediately=$(yq_get ".agents.$agent.auto_start // false")
-
         if [ "$starts_immediately" = "true" ]; then
             sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
-    cd '${REPO_DIR}'
-    printf '\033]0;${label}\007'
+    cd '${WORK_DIR}'
+    PROVIDER='${provider}'
+    MODEL='${model}'
+    AGENT_NAME='${agent}'
+    REPO_DIR='${WORK_DIR}'
+    ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
-    mkdir -p "\$TRIGGER_DIR"
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+
+    _provider_run_prompt() {
+        local _prompt="\$1"
+        if [ "\$PROVIDER" = "claude" ]; then
+            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME" "\$_prompt"
+        else
+            printf '%s\n\n%s\n' "\$SYSTEM_PROMPT" "\$_prompt" | codex exec --sandbox workspace-write -C "\$REPO_DIR" -
+        fi
+    }
+
     _collect_triggers() {
         local _collected=""
         for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
@@ -398,14 +377,15 @@ LAUNCHER
         fi
         printf '%s' "\$_collected"
     }
+
     while true; do
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            _provider_run_prompt "\$PENDING_MSG"
         else
             echo "working \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+            _provider_run_prompt "\$INIT_PROMPT"
         fi
         echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
         COMPLETE_MARKER="\$TRIGGER_DIR/.work-done"
@@ -419,12 +399,25 @@ LAUNCHER
         else
             sed 's/^    //' > "$PROMPT_DIR/run-${agent}.sh" << LAUNCHER
     #!/bin/bash
-    cd '${REPO_DIR}'
-    printf '\033]0;${label}\007'
+    cd '${WORK_DIR}'
+    PROVIDER='${provider}'
+    MODEL='${model}'
+    AGENT_NAME='${agent}'
+    REPO_DIR='${WORK_DIR}'
+    ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
-    mkdir -p "\$TRIGGER_DIR"
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+
+    _provider_run_file() {
+        local _file="\$1"
+        if [ "\$PROVIDER" = "claude" ]; then
+            cat "\$_file" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "\$ALLOWED_TOOLS" -n "\$AGENT_NAME"
+        else
+            { printf '%s\n\n' "\$SYSTEM_PROMPT"; cat "\$_file"; } | codex exec --sandbox workspace-write -C "\$REPO_DIR" -
+        fi
+    }
+
     _collect_worker_triggers() {
         local _work="\$TRIGGER_DIR/${agent}.msg"
         local _found=false
@@ -448,7 +441,8 @@ LAUNCHER
         rm -f "\$_work"
         return 1
     }
-    # Event-driven loop: wait for trigger files, start Claude with their contents
+
+    # Event-driven loop: wait for trigger files, start provider with their contents
     while true; do
         if _collect_worker_triggers; then
             WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
@@ -457,7 +451,7 @@ LAUNCHER
                 TASK_PREVIEW=\$(head -c 50 "\$WORK_FILE")
                 echo "working \$(date +%s) \$TASK_PREVIEW" > "\$TRIGGER_DIR/${agent}.state"
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
-                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                _provider_run_file "\$WORK_FILE"
                 if [ ! -f "\$TRIGGER_DIR/${agent}.done-sent" ]; then
                     '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
                 fi
@@ -475,7 +469,6 @@ LAUNCHER
     chmod +x "$PROMPT_DIR/run-${agent}.sh"
 }
 
-# ── Generate All ──
 generate_send_to_agent
 
 for agent in "${AGENTS[@]}"; do

@@ -11,6 +11,17 @@ setup_team_prompts() {
     "$GENERATE_HELPER" "$TEST_WORK_DIR"
 }
 
+# Helper: find per-sender trigger file(s) for an agent and return the first match
+# Usage: trigger_file_for "backend" => path to backend.from-*.trigger
+trigger_exists() {
+    ls "$TEST_WORK_DIR/.team-prompts/triggers/${1}.from-"*.trigger >/dev/null 2>&1
+}
+
+# Helper: cat all per-sender trigger files for an agent
+trigger_content() {
+    cat "$TEST_WORK_DIR/.team-prompts/triggers/${1}.from-"*.trigger
+}
+
 # Generate a long TASK message similar to what the architect would send
 generate_long_task() {
     local size="${1:-2000}"
@@ -30,19 +41,19 @@ generate_long_task() {
 # ── Trigger file delivery tests ──
 
 @test "long-msg: send-to-agent.sh creates trigger file for short message" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "TASK: simple task"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger" ]
-    [[ "$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")" == *"TASK: simple task"* ]]
+    trigger_exists backend
+    [[ "$(trigger_content backend)" == *"TASK: simple task"* ]]
 }
 
 @test "long-msg: 2KB message preserved in trigger file" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 2000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     # Verify the full message is preserved (not truncated)
     [ ${#stored} -ge 2000 ]
     [[ "$stored" == *"TASK [Ticket #2"* ]]
@@ -52,84 +63,84 @@ generate_long_task() {
 }
 
 @test "long-msg: 5KB message preserved in trigger file" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 5000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     [ ${#stored} -ge 5000 ]
 }
 
 @test "long-msg: 10KB message preserved in trigger file" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 10000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     [ ${#stored} -ge 10000 ]
 }
 
 @test "long-msg: 50KB message preserved in trigger file" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 50000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     [ ${#stored} -ge 50000 ]
 }
 
 # ── Cross-agent message delivery ──
 
 @test "long-msg: architect can send long message to backend" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 3000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger" ]
+    trigger_exists backend
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     [[ "$stored" == *"TASK [Ticket #2"* ]]
     [[ "$stored" == *"Dockerfile"* ]]
 }
 
 @test "long-msg: architect can send long message to frontend" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 3000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" FRONTEND "$msg"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/frontend.trigger" ]
+    trigger_exists frontend
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/frontend.trigger")
+    stored=$(trigger_content frontend)
     [ ${#stored} -ge 3000 ]
 }
 
 @test "long-msg: architect can send long message to qa" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 3000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" QA "$msg"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/qa.trigger" ]
+    trigger_exists qa
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/qa.trigger")
+    stored=$(trigger_content qa)
     [ ${#stored} -ge 3000 ]
 }
 
 @test "long-msg: simultaneous long messages to different agents" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg_be msg_fe
     msg_be=$(generate_long_task 4000)
     msg_fe="TASK [Ticket #2 - Frontend]: $(generate_long_task 4000)"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg_be"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" FRONTEND "$msg_fe"
     # Both trigger files should exist with full content
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger" ]
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/frontend.trigger" ]
+    trigger_exists backend
+    trigger_exists frontend
     local be_stored fe_stored
-    be_stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
-    fe_stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/frontend.trigger")
+    be_stored=$(trigger_content backend)
+    fe_stored=$(trigger_content frontend)
     [ ${#be_stored} -ge 4000 ]
     [ ${#fe_stored} -ge 4000 ]
     # Messages should be different (not cross-contaminated)
@@ -139,23 +150,23 @@ generate_long_task() {
 # ── Agent name case handling ──
 
 @test "long-msg: agent name is case-insensitive" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 2000)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger" ]
-    rm "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger"
+    trigger_exists backend
+    rm "$TEST_WORK_DIR/.team-prompts/triggers"/backend.from-*.trigger
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" backend "$msg"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger" ]
-    rm "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger"
+    trigger_exists backend
+    rm "$TEST_WORK_DIR/.team-prompts/triggers"/backend.from-*.trigger
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" Backend "$msg"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger" ]
+    trigger_exists backend
 }
 
 # ── Worker trigger file pickup simulation ──
 
 @test "long-msg: worker mv pattern preserves full message" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     mkdir -p "$trigger_dir"
     local msg
@@ -174,7 +185,7 @@ generate_long_task() {
 }
 
 @test "long-msg: new trigger doesn't overwrite in-progress work file" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     mkdir -p "$trigger_dir"
     # Simulate first message being processed (moved to .msg)
@@ -191,36 +202,36 @@ generate_long_task() {
 # ── Message content integrity ──
 
 @test "long-msg: special characters preserved in trigger file" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg='TASK: Create endpoint /api/v1/health that returns {"status": "ok", "version": "1.0.0"} with Content-Type: application/json. Use $ENV_VAR for config. Handle errors with try/except & log failures.'
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     [[ "$stored" == *'/api/v1/health'* ]]
     [[ "$stored" == *'"status"'* ]]
     [[ "$stored" == *'try/except'* ]]
 }
 
 @test "long-msg: multiline-like content preserved" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg="TASK [Ticket #5]: 1) Create auth.py with login/logout endpoints. 2) Add JWT token generation using PyJWT. 3) Create middleware for token validation. 4) Add rate limiting per-user. 5) Write tests for all endpoints. When done, commit your changes and send to architect: DONE-backend with summary of what was implemented."
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     [[ "$stored" == *"1) Create auth.py"* ]]
     [[ "$stored" == *"5) Write tests"* ]]
     [[ "$stored" == *"DONE-backend"* ]]
 }
 
 @test "long-msg: message ending is not truncated (the actual bug)" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local msg
     msg=$(generate_long_task 3000)
     # Append a known marker at the end
     msg+=" END_MARKER_12345"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "$msg"
     local stored
-    stored=$(cat "$TEST_WORK_DIR/.team-prompts/triggers/backend.trigger")
+    stored=$(trigger_content backend)
     # This was the actual bug — the end of long messages got truncated
     [[ "$stored" == *"END_MARKER_12345"* ]]
 }
@@ -228,7 +239,7 @@ generate_long_task() {
 # ── ACK mechanism tests ──
 
 @test "ack: worker creates ack file after picking up trigger" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     mkdir -p "$trigger_dir"
     # Simulate send-to-agent.sh writing trigger
@@ -242,7 +253,7 @@ generate_long_task() {
 }
 
 @test "ack: ack file is cleaned up after sender reads it" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     mkdir -p "$trigger_dir"
     # Create an ACK file (as worker would)
@@ -254,7 +265,7 @@ generate_long_task() {
 }
 
 @test "ack: ack not created when trigger file is empty" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     mkdir -p "$trigger_dir"
     # Create an empty trigger file (corruption scenario)
@@ -271,7 +282,7 @@ generate_long_task() {
 # ── Error handling tests ──
 
 @test "error: send-to-agent.sh exits non-zero when trigger dir is unwritable" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local prompt_dir="$TEST_WORK_DIR/.team-prompts"
     # Create a read-only triggers directory
     mkdir -p "$prompt_dir/triggers"
@@ -284,31 +295,33 @@ generate_long_task() {
 }
 
 @test "error: send-to-agent.sh verifies file was written" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "TASK: verify write"
-    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
-    [ -f "$trigger_dir/backend.trigger" ]
-    [ -s "$trigger_dir/backend.trigger" ]
+    trigger_exists backend
+    # Verify the trigger file is non-empty
+    local tf
+    tf=$(ls "$TEST_WORK_DIR/.team-prompts/triggers"/backend.from-*.trigger | head -1)
+    [ -s "$tf" ]
 }
 
 # ── DONE marker tests ──
 
 @test "done-marker: DONE message creates done-sent marker" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" ARCHITECT "DONE-backend: Task completed"
     [ -f "$trigger_dir/architect.done-sent" ]
 }
 
 @test "done-marker: non-DONE message does not create marker" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" BACKEND "TASK: do something"
     [ ! -f "$trigger_dir/backend.done-sent" ]
 }
 
 @test "done-marker: done-sent prevents duplicate auto-DONE" {
-    setup_team_prompts "dunno-agents.yaml"
+    setup_team_prompts "dunno-agents-codex.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     mkdir -p "$trigger_dir"
     # Simulate: agent already sent DONE (marker exists)
@@ -341,12 +354,11 @@ generate_long_task() {
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     # Send a DONE message to ARCHITECT (non-worker target)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" ARCHITECT "DONE-backend: All tasks completed successfully"
-    # Trigger file must exist and be non-empty — this is the fallback
-    # when AppleScript pane delivery fails (the bug this fix addresses)
-    [ -f "$trigger_dir/architect.trigger" ]
-    [ -s "$trigger_dir/architect.trigger" ]
+    # Per-sender trigger: DONE-backend → architect.from-backend.trigger
+    [ -f "$trigger_dir/architect.from-backend.trigger" ]
+    [ -s "$trigger_dir/architect.from-backend.trigger" ]
     local stored
-    stored=$(cat "$trigger_dir/architect.trigger")
+    stored=$(cat "$trigger_dir/architect.from-backend.trigger")
     [[ "$stored" == *"DONE-backend"* ]]
     [[ "$stored" == *"All tasks completed successfully"* ]]
 }
@@ -354,12 +366,14 @@ generate_long_task() {
 @test "long-msg: trigger file persists for non-worker delivery (pm)" {
     setup_team_prompts "dunno-agents.yaml"
     local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
-    # Send a COMPLETE message to PM (non-worker target)
+    # Send a COMPLETE message to PM (non-worker target, non-DONE → unique sender)
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" PM "COMPLETE: All tickets resolved"
-    [ -f "$trigger_dir/pm.trigger" ]
-    [ -s "$trigger_dir/pm.trigger" ]
+    trigger_exists pm
+    local tf
+    tf=$(ls "$trigger_dir"/pm.from-*.trigger | head -1)
+    [ -s "$tf" ]
     local stored
-    stored=$(cat "$trigger_dir/pm.trigger")
+    stored=$(cat "$tf")
     [[ "$stored" == *"COMPLETE"* ]]
 }
 
@@ -374,4 +388,3 @@ generate_long_task() {
     [ "$status" -ne 0 ]
     # Worker loop would 'continue' here — no crash
 }
-

@@ -1,6 +1,6 @@
 # dunno-workflow
 
-Declarative agent team orchestration for [Claude Code](https://claude.ai/claude-code). Define your team in YAML, launch in iTerm2.
+Declarative agent team orchestration for [Claude Code](https://claude.ai/claude-code) and Codex. Define your team in YAML, launch in iTerm2.
 
 ## Install
 
@@ -11,7 +11,7 @@ brew install cometdigitalagency/dunno/dunno-workflow
 ### Requirements
 
 - macOS with [iTerm2](https://iterm2.com/)
-- [Claude Code](https://claude.ai/claude-code) CLI (`claude`)
+- [Claude Code](https://claude.ai/claude-code) CLI (`claude`) or Codex CLI (`codex`)
 - [yq](https://github.com/mikefarah/yq) (installed automatically with brew)
 - [gh](https://cli.github.com/) (only if using GitHub ticket source)
 
@@ -21,6 +21,7 @@ brew install cometdigitalagency/dunno/dunno-workflow
 cd your-project
 dunno-workflow init           # creates workflow.yaml
 vim workflow.yaml             # customize agents, ticket source
+dunno-workflow login          # login to the configured provider CLI
 dunno-workflow start          # launch team in iTerm2
 dunno-workflow start --debug  # with filtered LOGS pane
 ```
@@ -30,6 +31,7 @@ dunno-workflow start --debug  # with filtered LOGS pane
 | Command | Description |
 |---------|-------------|
 | `dunno-workflow init` | Create `workflow.yaml` template in current directory |
+| `dunno-workflow login [provider]` | Log in to `claude`, `codex`, or the provider from `workflow.yaml` |
 | `dunno-workflow start` | Launch agent team in iTerm2 |
 | `dunno-workflow start --debug` | Launch with LOGS pane (filtered, color-coded) |
 | `dunno-workflow start --test` | Test mode with mock/file-based ticket |
@@ -48,7 +50,7 @@ dunno-workflow start   Reads YAML, generates prompts & launchers
        ▼
 ┌──────┬─────────┬──────────┐
 │  PM  │ BACKEND │ ARCHITECT│   iTerm2 split panes
-│      ├─────────┼──────────┤   Each agent = Claude Code session
+│      ├─────────┼──────────┤   Each agent = provider CLI session
 │      │   QA    │ FRONTEND │
 └──────┴─────────┴──────────┘
 ```
@@ -61,6 +63,13 @@ dunno-workflow start   Reads YAML, generates prompts & launchers
 ## workflow.yaml
 
 ### Agents
+
+```yaml
+runtime:
+  provider: claude   # or: codex
+```
+
+Use one provider for the whole workflow for now. Mixed-provider teams are planned later.
 
 ```yaml
 agents:

@@ -1,0 +1,65 @@
+project:
+  name: minimal-codex
+  repo: test/repo
+
+runtime:
+  provider: codex
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+    format: markdown
+
+events:
+  task:
+    description: Work assignment
+    format: "TASK: {description}"
+    direction: lead -> worker
+
+agents:
+  lead:
+    role: Lead
+    description: Interactive lead agent
+    interactive: true
+    model: gpt-5.4
+    tools: [read, bash]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [task]
+    receives: []
+    workflow:
+      - "Take user input"
+      - "Create tasks"
+    rules:
+      - "Do not write code"
+    init:
+      default: "I'm the lead. Give me work."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  worker:
+    role: Worker
+    description: Does the work
+    interactive: false
+    model: gpt-5.4
+    tools: [read, edit, write, bash]
+    owns: { paths: ["src/**"], never_edit: [] }
+    stack: []
+    sends: []
+    receives: [task]
+    workflow:
+      - "Wait for TASK message"
+      - "Execute task"
+    rules:
+      - "Follow existing patterns"
+    init:
+      default: "Wait for tasks."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

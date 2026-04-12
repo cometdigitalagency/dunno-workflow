@@ -1,0 +1,130 @@
+project:
+  name: startup-app-codex
+  repo: test/startup-app
+
+runtime:
+  provider: codex
+
+tickets:
+  source: file
+  file:
+    directory: ./tickets
+    format: markdown
+
+events:
+  task:
+    description: Work assignment from architect to worker
+    format: "TASK [Issue #{issue}]: {description}"
+    direction: architect -> dev | qa
+  done:
+    description: Worker reports completion
+    format: "DONE-{agent}: {summary}"
+    direction: dev | qa -> architect
+  complete:
+    description: All work finished
+    format: "COMPLETE: Issue #{issue} done."
+    direction: architect -> pm
+
+agents:
+  pm:
+    role: Project Manager
+    description: User-facing interface for ticket management.
+    interactive: true
+    model: gpt-5.4
+    tools: [read, bash, glob, grep]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [task]
+    receives: [complete]
+    workflow:
+      - "Take user input"
+      - "Create or assign tickets"
+    rules:
+      - "Do not write code"
+    commands:
+      status: "List open tickets"
+      "tell <agent> ...": "Send message to agent"
+    init:
+      default: "I'm your PM. Say status or give me an idea."
+      test: "{default}"
+      issue: "Working on issue #{issue_num}."
+    prompt_extra: ""
+
+  architect:
+    role: System Architect
+    description: Plans work and dispatches tasks sequentially.
+    interactive: false
+    auto_start: true
+    model: gpt-5.4
+    tools: [read, bash, glob, grep]
+    owns: { paths: [], never_edit: ["**/*"] }
+    stack: []
+    sends: [task, complete]
+    receives: [done]
+    workflow:
+      - "Pick up ready tickets"
+      - "Plan work breakdown"
+      - "PHASE 1: Dispatch to dev"
+      - "Wait for DONE-dev"
+      - "PHASE 2: Dispatch to qa"
+      - "Wait for DONE-qa"
+      - "Send COMPLETE to pm"
+    rules:
+      - "Never dispatch qa before dev is done"
+    init:
+      default: "Check for ready tickets."
+      test: "{default}"
+      issue: "Start on ticket #{issue_num}."
+    prompt_extra: ""
+
+  dev:
+    role: Developer
+    description: Implements features and fixes.
+    interactive: false
+    model: gpt-5.4
+    tools: [read, edit, write, bash, glob, grep]
+    owns:
+      paths: ["src/**"]
+      never_edit: ["tests/**"]
+    stack: [Python]
+    sends: [done]
+    receives: [task]
+    workflow:
+      - "Wait for TASK message"
+      - "Implement the change"
+      - "Send DONE-dev"
+    rules:
+      - "Never edit test files"
+    init:
+      default: "Event-driven. Wait for TASK messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  qa:
+    role: QA Engineer
+    description: Writes and runs tests.
+    interactive: false
+    model: gpt-5.4
+    tools: [read, edit, write, bash, glob, grep]
+    owns:
+      paths: ["tests/**"]
+      never_edit: ["src/**"]
+    stack: [pytest]
+    sends: [done]
+    receives: [task]
+    workflow:
+      - "Wait for TASK message"
+      - "Run tests and write new ones"
+      - "Send DONE-qa"
+    rules:
+      - "Never edit source files"
+    init:
+      default: "Event-driven. Wait for TASK messages."
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+layout:
+  mode: auto
+  debug_pane: false

@@ -1,42 +1,40 @@
 # ============================================================================
 # workflow.yaml — Declarative Agent Team Configuration
-#
-# This file drives dunno-workflow. Edit this to change agents, events,
-# ticket sources, or layout. No need to touch shell scripts.
-#
-# Docs: https://github.com/cometdigitalagency/dunno-workflow
 # ============================================================================
 
 project:
-  name: my-project              # Your project name
-  repo: org/repo                # GitHub owner/repo (used for gh CLI)
-  description: ""
+  name: dunno-agents-codex
+  repo: arno-dev/dunno-agents
+  description: Microservices AI platform with scraping/analysis agents
 
 runtime:
-  provider: claude              # Supported: claude, codex (single provider per workflow for now)
+  provider: codex
 
-# ── Ticket Source ──
-# Supported: github, jira, clickup, file
 tickets:
-  source: github
+  source: file
   github:
-    repo: org/repo              # defaults to project.repo if omitted
+    repo: arno-dev/dunno-agents
     labels:
       ready: ready
       in_progress: in-progress
       done: done
-  # jira:
-  #   server: https://your-org.atlassian.net
-  #   project_key: PROJ
-  #   statuses: { ready: "To Do", in_progress: "In Progress", done: "Done" }
-  # clickup:
-  #   list_id: "YOUR_LIST_ID"
-  #   statuses: { ready: "to do", in_progress: "in progress", done: "complete" }
-  # file:
-  #   directory: ./tickets
-  #   format: markdown
+  jira:
+    server: https://your-org.atlassian.net
+    project_key: DUNNO
+    statuses:
+      ready: "To Do"
+      in_progress: "In Progress"
+      done: "Done"
+  clickup:
+    list_id: "YOUR_LIST_ID"
+    statuses:
+      ready: "to do"
+      in_progress: "in progress"
+      done: "complete"
+  file:
+    directory: ./tickets
+    format: markdown
 
-# ── Events (message types between agents) ──
 events:
   task:
     description: Work assignment from architect to a worker agent
@@ -52,14 +50,13 @@ events:
     direction: workers -> architect
   complete:
     description: All work on an issue is finished
-    format: "COMPLETE: Issue #{issue} — {title} is done."
+    format: "COMPLETE: Issue #{issue} — {title} is done. All agents reported success."
     direction: architect -> pm
   bug:
     description: QA reports a test failure to the responsible agent
     format: "BUG: {description}"
     direction: qa -> backend | frontend
 
-# ── Agents ──
 agents:
   pm:
     role: Project Manager
@@ -67,9 +64,11 @@ agents:
       The user's main interface. Takes ideas and creates tickets
       for the team. Does NOT write code.
     interactive: true
-    model: sonnet               # Provider-specific model name
+    model: gpt-5.4
     tools: [read, bash, glob, grep, task_list, send_message]
-    owns: { paths: [], never_edit: ["**/*"] }
+    owns:
+      paths: []
+      never_edit: ["**/*"]
     stack: []
     sends: [task]
     receives: [complete]
@@ -93,6 +92,8 @@ agents:
       "pause all": "Send pause message to all agents"
       "resume all": "Send resume message to all agents"
       "show backlog": "List all open tickets"
+      "edit task #N ...": "Update task, notify assigned agent"
+      "reassign task #N to <agent>": "Change owner, notify both agents"
       "close issue #N": "Close the ticket"
     init:
       default: >
@@ -105,9 +106,7 @@ agents:
       issue: >
         The team is working on Issue #{issue_num}. The architect will pick
         it up shortly. Give me ideas, ask for status, or send commands.
-    prompt_extra: |
-      ## HANDLING COMPLETION MESSAGES
-      When you receive a message starting with "COMPLETE:", display a celebratory banner.
+    prompt_extra: ""
 
   architect:
     role: System Architect
@@ -117,57 +116,55 @@ agents:
       monitors completion. Does NOT write code.
     interactive: false
     auto_start: true
-    model: sonnet               # Provider-specific model name
+    model: gpt-5.4
     tools: [read, bash, glob, grep, task_create, task_update, task_list, send_message]
-    owns: { paths: [], never_edit: ["**/*"] }
+    owns:
+      paths: []
+      never_edit: ["**/*"]
     stack: []
     sends: [task, complete]
     receives: [done, done_notify]
     workflow:
-      - "Check for ready tickets or wait for PM to send one"
-      - "Read the ticket and understand the requirements"
+      - "Wait for a message from PM with a ticket to work on, or check for ready tickets"
+      - "When you have a ticket: read it and understand the requirements"
       - "Mark the ticket as in-progress"
       - "Read relevant code to understand the codebase"
       - "Create a detailed plan. Only dispatch to agents that have actual work."
       - "PHASE 1 — DISPATCH to BACKEND and FRONTEND only. Do NOT dispatch QA yet."
       - "Comment on the ticket: 'Planning complete. Tasks dispatched to: <agents>.'"
       - "WAIT for DONE-backend and DONE-frontend messages"
-      - "PHASE 2 — Once backend and frontend are DONE, NOW dispatch QA"
+      - "PHASE 2 — Once backend and frontend are DONE, NOW dispatch QA with its tasks"
       - "WAIT for DONE-qa message"
       - "When all agents report done: mark ticket as done, notify PM via COMPLETE message"
       - "Return to waiting for the next ticket"
     rules:
       - "NEVER rely on TaskCreate alone — agents cannot see it, you MUST use send-to-agent.sh"
       - "Always dispatch via send-to-agent.sh using the Bash tool"
-      - "NEVER dispatch QA at the same time as backend/frontend"
+      - "NEVER dispatch QA at the same time as backend/frontend — QA must wait until implementation is done"
       - "After dispatching, wait silently for DONE messages — do NOT poll or sleep"
+      - "At startup, clean up any stale in-progress tickets from previous sessions"
     init:
       default: >
         Check for ready tickets using the TICKET COMMANDS in your system prompt.
+        Read the ticket, plan the work, and dispatch tasks to agents.
         If no ready tickets, wait for the PM to send you one.
       test: "{default}"
       issue: >
         Start working on ticket #{issue_num}. Read it, then plan and
         dispatch tasks to agents via send-to-agent.sh.
-    prompt_extra: |
-      ## DISPATCH ORDER — THIS IS CRITICAL
-      PHASE 1: Dispatch BACKEND and FRONTEND only. Wait for their DONE messages.
-      PHASE 2: Only AFTER receiving DONE-backend and DONE-frontend, dispatch QA.
-
-      ## EVENT-DRIVEN — NO POLLING
-      After dispatching, just WAIT. Do NOT run sleep, loops, or grep commands.
-      The agents will message you directly via send-to-agent.sh when done.
+    prompt_extra: ""
 
   backend:
     role: Backend Developer
-    description: Implements backend services, APIs, and modules.
+    description: >
+      Implements Python/FastAPI backend services, APIs, and modules.
     interactive: false
-    model: sonnet               # Provider-specific model name
+    model: gpt-5.4
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
-      paths: ["src/**", "api/**", "lib/**"]
+      paths: ["agents/**", "gateway/**", "orchestrator/**"]
       never_edit: ["frontend/**"]
-    stack: []
+    stack: [Python, FastAPI, Docker, Redis, Kafka, pytest]
     sends: [done, done_notify]
     receives: [task, bug]
     workflow:
@@ -177,9 +174,11 @@ agents:
       - "Notify the architect: DONE-backend with a brief summary"
       - "Wait for the next message"
     rules:
+      - "Only edit files in agents/, gateway/, orchestrator/"
+      - "NEVER edit files in frontend/"
       - "Follow existing code patterns"
       - "Read files before editing them"
-      - "Work on ONE issue at a time"
+      - "Work on ONE issue at a time — finish and post Done before accepting new tasks"
     init:
       default: >
         You are event-driven. Wait for TASK: messages from the architect.
@@ -190,14 +189,15 @@ agents:
 
   frontend:
     role: Frontend Developer
-    description: Implements UI components and pages.
+    description: >
+      Implements React/Next.js/TypeScript UI components and pages.
     interactive: false
-    model: sonnet               # Provider-specific model name
+    model: gpt-5.4
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
       paths: ["frontend/**"]
-      never_edit: ["src/**", "api/**", "lib/**"]
-    stack: []
+      never_edit: ["agents/**", "gateway/**", "orchestrator/**"]
+    stack: [React, Next.js, TypeScript, TailwindCSS, Playwright]
     sends: [done, done_notify]
     receives: [task, bug]
     workflow:
@@ -207,7 +207,9 @@ agents:
       - "Notify the architect: DONE-frontend with a brief summary"
       - "Wait for the next message"
     rules:
-      - "Follow existing component patterns"
+      - "Only edit files in frontend/"
+      - "NEVER edit backend files"
+      - "Follow existing component patterns and Tailwind styling"
       - "Read files before editing them"
       - "Work on ONE issue at a time"
     init:
@@ -221,38 +223,38 @@ agents:
   qa:
     role: QA Engineer
     description: >
-      Writes tests and verifies quality. The architect will only send
-      tasks AFTER implementation is done.
+      Writes tests and verifies quality. Uses pytest for backend
+      and Playwright for frontend.
     interactive: false
-    model: sonnet
+    model: gpt-5.4
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
-      paths: ["tests/**", "**/*test*"]
+      paths: ["agents/*/tests/**", "frontend/tests/**", "tests/**"]
       never_edit: []
-    stack: []
+    stack: [pytest, Playwright]
     sends: [done, done_notify, bug]
     receives: [task]
     workflow:
-      - "Wait for a TASK: message from the architect (code is already written)"
-      - "Read the implementation code"
+      - "Wait for a TASK: message from the architect"
+      - "Read the implementation code written by backend/frontend"
       - "Write comprehensive tests"
-      - "Run the tests"
-      - "If tests pass: notify architect with DONE-qa"
-      - "If tests fail: send BUG to the responsible agent, do NOT send DONE-qa"
+      - "Run the tests using Bash"
+      - "If tests pass: notify architect with DONE-qa via send-to-agent.sh"
+      - "If tests fail: send BUG message to the responsible agent via send-to-agent.sh, do NOT send DONE-qa"
       - "Wait for the next message"
     rules:
+      - "You can edit test files anywhere"
       - "Always run tests after writing them"
       - "Report bugs with detailed reproduction steps"
-      - "NEVER poll, sleep, or run loops — just wait for messages"
+      - "Do NOT send DONE-qa until ALL tests pass"
     init:
       default: >
         You are event-driven. Wait for TASK: messages from the architect.
-        Do NOT poll or sleep. Execute tasks immediately when received.
+        Execute tasks immediately when received.
       test: "{default}"
       issue: "{default}"
     prompt_extra: ""
 
-# ── Layout ──
 layout:
   mode: auto
   debug_pane: false

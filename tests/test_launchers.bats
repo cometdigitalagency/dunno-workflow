@@ -74,6 +74,11 @@ launcher() {
     grep -q 'claude -p' "$(launcher pm)"
 }
 
+@test "pm-repl: Codex provider uses codex exec" {
+    generate_all "startup-team-codex.yaml"
+    grep -q 'codex exec' "$(launcher pm)"
+}
+
 @test "pm-repl: PM embeds ticket commands" {
     generate_all "startup-team.yaml"
     grep -q 'CMD_LIST_OPEN=' "$(launcher pm)"
@@ -113,6 +118,11 @@ launcher() {
 @test "worker: startup-team dev has event-driven loop" {
     generate_all "startup-team.yaml"
     grep -q 'Event-driven loop' "$(launcher dev)"
+}
+
+@test "worker: Codex worker uses codex exec" {
+    generate_all "startup-team-codex.yaml"
+    grep -q 'codex exec' "$(launcher dev)"
 }
 
 @test "worker: parallel-workers api has event-driven loop" {
@@ -184,6 +194,11 @@ launcher() {
     grep -q 'while true' "$(launcher architect)"
 }
 
+@test "auto_start: Codex architect uses codex exec" {
+    generate_all "startup-team-codex.yaml"
+    grep -q 'codex exec' "$(launcher architect)"
+}
+
 @test "auto_start: parallel-workers lead has restart loop" {
     generate_all "parallel-workers.yaml"
     grep -q 'sleep 5' "$(launcher lead)"
@@ -196,7 +211,7 @@ launcher() {
 
 @test "auto_start: checks for pending trigger before restart" {
     generate_all "startup-team.yaml"
-    grep -q 'TRIGGER_FILE' "$(launcher architect)"
+    grep -q '_collect_triggers' "$(launcher architect)"
     grep -q 'PENDING_MSG' "$(launcher architect)"
 }
 
@@ -259,18 +274,20 @@ launcher() {
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" API "TASK: build endpoint"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" WEB "TASK: build ui"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" REVIEWER "REVIEW-REQUEST: check code"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/api.trigger" ]
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/web.trigger" ]
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/reviewer.trigger" ]
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
+    ls "$trigger_dir"/api.from-*.trigger >/dev/null 2>&1
+    ls "$trigger_dir"/web.from-*.trigger >/dev/null 2>&1
+    ls "$trigger_dir"/reviewer.from-*.trigger >/dev/null 2>&1
 }
 
 @test "send: bidirectional impl can send to verifier and vice versa" {
     generate_all "bidirectional.yaml"
+    local trigger_dir="$TEST_WORK_DIR/.team-prompts/triggers"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" VERIFIER "DONE-impl: finished"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/verifier.trigger" ]
-    rm "$TEST_WORK_DIR/.team-prompts/triggers/verifier.trigger"
+    [ -f "$trigger_dir/verifier.from-impl.trigger" ]
+    rm "$trigger_dir"/verifier.from-*.trigger
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" IMPL "BUG: test failure"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/impl.trigger" ]
+    ls "$trigger_dir"/impl.from-*.trigger >/dev/null 2>&1
 }
 
 @test "send: DONE message creates done-sent marker across fixtures" {
