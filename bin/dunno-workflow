@@ -1447,7 +1447,7 @@ HELPER
                 else
                     MSG=\$(echo "\$INPUT" | sed 's/^tell *[^ ]* *//')
                     AGENT_UPPER=\$(echo "\$AGENT" | tr '[:lower:]' '[:upper:]')
-                    '\${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
+                    '${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
                     echo "  Sent to \$AGENT."
                 fi
                 echo ""
