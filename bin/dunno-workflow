@@ -444,7 +444,8 @@ analyze_session_crashes() {
         agent=$(basename "$logfile" .log)
         if grep -qai "$crash_pattern" "$logfile" 2>/dev/null; then
             local err_lines
-            err_lines=$(grep -ai "$crash_pattern" "$logfile" | grep -avi "$exclude_pattern" | head -3)
+            # Filter out binary/ANSI escape sequence matches (e.g. "Binary file ... matches")
+            err_lines=$(grep -ai "$crash_pattern" "$logfile" | grep -avi "$exclude_pattern" | grep -v "^Binary file" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -i "$crash_pattern" | head -3)
             if [ -n "$err_lines" ]; then
                 _add_finding "ERROR" \
                     "SESSION CRASH: ${agent} has error traces in log" \
@@ -972,7 +973,21 @@ cmd_start() {
         exit 1
     fi
 
-    TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.trigger"
+    # Per-sender trigger files to prevent race conditions.
+    # DONE-{sender} messages get a deterministic filename; others get a unique suffix.
+    case "$MESSAGE" in
+        DONE-*|Done-*)
+            # Extract sender name from "DONE-frontend:..." -> "frontend"
+            SENDER=$(echo "$MESSAGE" | sed 's/^[Dd][Oo][Nn][Ee]-\([^:]*\).*/\1/' | tr '[:upper:]' '[:lower:]')
+            TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.from-${SENDER}.trigger"
+            touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
+            ;;
+        *)
+            SENDER="msg-$(date +%s)-$$"
+            TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.from-${SENDER}.trigger"
+            ;;
+    esac
+
     if ! printf '%s\n' "$MESSAGE" > "$TRIGGER_FILE"; then
         echo "ERROR: Failed to write trigger file: $TRIGGER_FILE" >&2
         exit 1
@@ -983,13 +998,6 @@ cmd_start() {
         echo "ERROR: Trigger file is empty after write: $TRIGGER_FILE" >&2
         exit 1
     fi
-
-    # Track DONE messages so auto-DONE doesn't duplicate them
-    case "$MESSAGE" in
-        DONE-*|Done-*)
-            touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
-            ;;
-    esac
 
     # Deliver message to the iTerm2 pane.
     # Worker agents (event-driven) read from .trigger files — they only need a nudge.
@@ -1365,16 +1373,28 @@ HELPER
 
     # Background: watch for incoming messages (COMPLETE, etc.)
     (while true; do
+        _PM_MSG=""
+        # Collect per-sender trigger files
+        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$_tf" ] || continue
+            _PM_MSG="\${_PM_MSG}\$(cat "\$_tf")
+"
+            rm -f "\$_tf"
+        done
+        # Legacy single trigger file (backward compat)
         if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
-            MSG=\$(cat "\$TRIGGER_DIR/${agent}.trigger")
+            _PM_MSG="\${_PM_MSG}\$(cat "\$TRIGGER_DIR/${agent}.trigger")
+"
             rm -f "\$TRIGGER_DIR/${agent}.trigger"
+        fi
+        if [ -n "\$_PM_MSG" ]; then
             # ACK the pickup
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
             echo ""
             echo "═══════════════════════════════════════"
             echo "  INCOMING MESSAGE"
             echo "═══════════════════════════════════════"
-            echo "  \$MSG"
+            echo "  \$_PM_MSG"
             echo "═══════════════════════════════════════"
             echo ""
             printf "PM> "
@@ -1384,9 +1404,16 @@ HELPER
     BG_PID=\$!
     trap "kill \$BG_PID 2>/dev/null" EXIT
 
+    # Pause helper — press any key to return to PM prompt
+    _pm_pause() {
+        echo ""
+        echo "  (press Enter to continue)"
+        read -r -s -n 1 2>/dev/null || true
+    }
+
     # REPL
     while true; do
-        read -r -p "PM> " INPUT || break
+        read -r -p "PM> " INPUT || { sleep 1; continue; }
         [ -z "\$INPUT" ] && continue
 
         case "\$INPUT" in
@@ -1408,40 +1435,40 @@ HELPER
             status)
                 echo ""
                 eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "  (no tickets found)"
-                echo ""
+                _pm_pause
                 ;;
             backlog|"show backlog")
                 echo ""
                 eval "\$CMD_LIST_READY" 2>/dev/null || echo "  (no ready tickets)"
-                echo ""
+                _pm_pause
                 ;;
             stale)
                 echo ""
                 eval "\$CMD_LIST_STALE" 2>/dev/null | jq -r '.[] | "\(.number) \(.title)"' 2>/dev/null || echo "  (no stale tickets)"
-                echo ""
+                _pm_pause
                 ;;
             view\ *|issue\ *)
                 N=\$(echo "\$INPUT" | sed 's/^[a-z]* #*//' | tr -d ' ')
                 eval "\$(echo "\$CMD_VIEW" | sed "s/\\\$N/\$N/g")" 2>/dev/null || echo "  ERROR: could not view ticket \$N"
-                echo ""
+                _pm_pause
                 ;;
             close\ *|"close issue"\ *)
                 N=\$(echo "\$INPUT" | sed 's/^close *issue *#*//' | sed 's/^close *//' | tr -d ' ')
                 echo "  Closing ticket #\$N..."
                 eval "\$(echo "\$CMD_CLOSE" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not close ticket \$N"
-                echo ""
+                _pm_pause
                 ;;
             claim\ *)
                 N=\$(echo "\$INPUT" | sed 's/^claim *#*//' | tr -d ' ')
                 echo "  Claiming ticket #\$N..."
                 eval "\$(echo "\$CMD_CLAIM" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not claim ticket \$N"
-                echo ""
+                _pm_pause
                 ;;
             comment\ *)
                 N=\$(echo "\$INPUT" | awk '{print \$2}' | tr -d '#')
                 MSG=\$(echo "\$INPUT" | sed 's/^comment *[#0-9]* *//')
                 eval "\$(echo "\$CMD_COMMENT" | sed "s/\\\$N/\$N/g" | sed "s/\\\$MSG/\$MSG/g")" 2>/dev/null && echo "  Comment added." || echo "  ERROR: could not comment on ticket \$N"
-                echo ""
+                _pm_pause
                 ;;
             tell\ *)
                 AGENT=\$(echo "\$INPUT" | awk '{print tolower(\$2)}')
@@ -1454,7 +1481,7 @@ HELPER
                     '${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
                     echo "  Sent to \$AGENT."
                 fi
-                echo ""
+                _pm_pause
                 ;;
             agents|team)
                 echo ""
@@ -1466,7 +1493,7 @@ HELPER
                         _min=\$(( _elapsed / 60 ))
                         _sec=\$(( _elapsed % 60 ))
                         printf "  %-14s %-10s %sm %ss\n" "\$_a" "● working" "\$_min" "\$_sec"
-                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ]; then
+                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ] || ls "\$TRIGGER_DIR/\${_a}".from-*.trigger >/dev/null 2>&1; then
                         printf "  %-14s %-10s %s\n" "\$_a" "◉ pending" "—"
                     elif [ -f "\$TRIGGER_DIR/\${_a}.done-sent" ]; then
                         printf "  %-14s %-10s %s\n" "\$_a" "✓ done" "—"
@@ -1474,13 +1501,13 @@ HELPER
                         printf "  %-14s %-10s %s\n" "\$_a" "○ idle" "—"
                     fi
                 done
-                echo ""
+                _pm_pause
                 ;;
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
                 echo ""
                 echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
-                echo ""
+                _pm_pause
                 ;;
             quit|exit)
                 echo "  Goodbye."
@@ -1490,7 +1517,7 @@ HELPER
                 # Unrecognized — fall back to LLM
                 echo ""
                 echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
-                echo ""
+                _pm_pause
                 ;;
         esac
     done
@@ -1516,15 +1543,32 @@ LAUNCHER
     
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
-    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
 
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
 
+    # Collect all per-sender trigger files (and legacy single file) into one message
+    _collect_triggers() {
+        local _collected=""
+        # Per-sender trigger files
+        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$_tf" ] || continue
+            _collected="\${_collected}\$(cat "\$_tf")
+"
+            rm -f "\$_tf"
+        done
+        # Legacy single trigger file (backward compat)
+        if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
+            _collected="\${_collected}\$(cat "\$TRIGGER_DIR/${agent}.trigger")
+"
+            rm -f "\$TRIGGER_DIR/${agent}.trigger"
+        fi
+        printf '%s' "\$_collected"
+    }
+
     while true; do
-        # Check for pending trigger file (message arrived while session was down)
-        if [ -f "\$TRIGGER_FILE" ]; then
-            PENDING_MSG=\$(cat "\$TRIGGER_FILE")
-            rm -f "\$TRIGGER_FILE"
+        # Check for pending trigger files (messages arrived while session was down)
+        PENDING_MSG=\$(_collect_triggers)
+        if [ -n "\$PENDING_MSG" ]; then
             echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
@@ -1542,10 +1586,9 @@ LAUNCHER
             echo "--- [\$(date '+%H:%M:%S')] Auto-sent COMPLETE to PM ---"
             rm -f "\$COMPLETE_MARKER"
         fi
-        # Check for trigger file that arrived while session was active (AppleScript delivery failed)
-        if [ -f "\$TRIGGER_FILE" ]; then
-            PENDING_MSG=\$(cat "\$TRIGGER_FILE")
-            rm -f "\$TRIGGER_FILE"
+        # Check for trigger files that arrived while session was active
+        PENDING_MSG=\$(_collect_triggers)
+        if [ -n "\$PENDING_MSG" ]; then
             echo "--- [\$(date '+%H:%M:%S')] Found pending message during post-session check (\${#PENDING_MSG} chars) ---"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
         fi
@@ -1561,31 +1604,45 @@ LAUNCHER
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
-    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
-    
+
     echo "╔══════════════════════════════════════╗"
     echo "║  ${label} agent"
     echo "║  Idle — waiting for messages..."
     echo "╚══════════════════════════════════════╝"
     echo ""
-    
+
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
 
-    # Event-driven loop: wait for trigger file, start Claude with its contents
+    # Collect all per-sender trigger files (and legacy single file) into work file
+    _collect_worker_triggers() {
+        local _work="\$TRIGGER_DIR/${agent}.msg"
+        local _found=false
+        : > "\$_work"
+        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$_tf" ] || continue
+            cat "\$_tf" >> "\$_work"
+            printf '\n' >> "\$_work"
+            rm -f "\$_tf"
+            _found=true
+        done
+        # Legacy single trigger file (backward compat)
+        if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
+            cat "\$TRIGGER_DIR/${agent}.trigger" >> "\$_work"
+            printf '\n' >> "\$_work"
+            rm -f "\$TRIGGER_DIR/${agent}.trigger"
+            _found=true
+        fi
+        if [ "\$_found" = true ] && [ -s "\$_work" ]; then
+            return 0
+        fi
+        rm -f "\$_work"
+        return 1
+    }
+
+    # Event-driven loop: wait for trigger files, start Claude with their contents
     while true; do
-        if [ -f "\$TRIGGER_FILE" ]; then
-            # Move trigger to a work file so new messages don't collide
+        if _collect_worker_triggers; then
             WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
-            MOVE_RETRIES=0
-            while ! mv "\$TRIGGER_FILE" "\$WORK_FILE" 2>/dev/null; do
-                MOVE_RETRIES=\$((MOVE_RETRIES + 1))
-                if [ \$MOVE_RETRIES -ge 5 ]; then
-                    echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file vanished after 5 retries (race condition) ---"
-                    continue 2
-                fi
-                echo "--- [\$(date '+%H:%M:%S')] WARNING: trigger file not ready, retry \$MOVE_RETRIES/5... ---"
-                sleep 1
-            done
 
             # ACK: confirm message pickup so sender knows we got it
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
@@ -1720,6 +1777,7 @@ ENDSCRIPT
     import iterm2
     import asyncio
     import os
+    import glob
     import re
     import subprocess
     import time
@@ -1852,7 +1910,7 @@ ENDSCRIPT
                 working_count += 1
                 icon = "●"
                 color = COLORS.get(agent, "")
-            elif os.path.exists(trigger_file):
+            elif os.path.exists(trigger_file) or glob.glob(os.path.join(TRIGGER_DIR, f"{agent}.from-*.trigger")):
                 pending_count += 1
                 icon = "◉"
                 color = "\033[33m"

@@ -244,7 +244,19 @@ if ! mkdir -p "$TRIGGER_DIR" 2>/dev/null; then
     exit 1
 fi
 
-TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.trigger"
+# Per-sender trigger files to prevent race conditions.
+case "$MESSAGE" in
+    DONE-*|Done-*)
+        SENDER=$(echo "$MESSAGE" | sed 's/^[Dd][Oo][Nn][Ee]-\([^:]*\).*/\1/' | tr '[:upper:]' '[:lower:]')
+        TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.from-${SENDER}.trigger"
+        touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
+        ;;
+    *)
+        SENDER="msg-$(date +%s)-$$"
+        TRIGGER_FILE="$TRIGGER_DIR/${AGENT_NAME}.from-${SENDER}.trigger"
+        ;;
+esac
+
 if ! printf '%s\n' "$MESSAGE" > "$TRIGGER_FILE"; then
     echo "ERROR: Failed to write trigger file: $TRIGGER_FILE" >&2
     exit 1
@@ -254,12 +266,6 @@ if [ ! -s "$TRIGGER_FILE" ]; then
     echo "ERROR: Trigger file is empty after write: $TRIGGER_FILE" >&2
     exit 1
 fi
-
-case "$MESSAGE" in
-    DONE-*|Done-*)
-        touch "$TRIGGER_DIR/${AGENT_NAME}.done-sent" 2>/dev/null
-        ;;
-esac
 
 AGENT_UPPER=$(echo "$AGENT_NAME" | tr '[:lower:]' '[:upper:]')
 PREVIEW="${MESSAGE:0:120}"
@@ -334,7 +340,7 @@ generate_launcher() {
                 for _a in \$AGENT_LIST; do
                     if [ -f "\$TRIGGER_DIR/\${_a}.msg" ]; then
                         printf "  %-14s working\n" "\$_a"
-                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ]; then
+                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ] || ls "\$TRIGGER_DIR/\${_a}".from-*.trigger >/dev/null 2>&1; then
                         printf "  %-14s pending\n" "\$_a"
                     elif [ -f "\$TRIGGER_DIR/\${_a}.done-sent" ]; then
                         printf "  %-14s done\n" "\$_a"
@@ -376,12 +382,25 @@ LAUNCHER
     INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
-    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+    _collect_triggers() {
+        local _collected=""
+        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$_tf" ] || continue
+            _collected="\${_collected}\$(cat "\$_tf")
+"
+            rm -f "\$_tf"
+        done
+        if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
+            _collected="\${_collected}\$(cat "\$TRIGGER_DIR/${agent}.trigger")
+"
+            rm -f "\$TRIGGER_DIR/${agent}.trigger"
+        fi
+        printf '%s' "\$_collected"
+    }
     while true; do
-        if [ -f "\$TRIGGER_FILE" ]; then
-            PENDING_MSG=\$(cat "\$TRIGGER_FILE")
-            rm -f "\$TRIGGER_FILE"
+        PENDING_MSG=\$(_collect_triggers)
+        if [ -n "\$PENDING_MSG" ]; then
             echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
         else
@@ -405,15 +424,34 @@ LAUNCHER
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
-    TRIGGER_FILE="\$TRIGGER_DIR/${agent}.trigger"
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
-    # Event-driven loop: wait for trigger file, start Claude with its contents
+    _collect_worker_triggers() {
+        local _work="\$TRIGGER_DIR/${agent}.msg"
+        local _found=false
+        : > "\$_work"
+        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$_tf" ] || continue
+            cat "\$_tf" >> "\$_work"
+            printf '\n' >> "\$_work"
+            rm -f "\$_tf"
+            _found=true
+        done
+        if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
+            cat "\$TRIGGER_DIR/${agent}.trigger" >> "\$_work"
+            printf '\n' >> "\$_work"
+            rm -f "\$TRIGGER_DIR/${agent}.trigger"
+            _found=true
+        fi
+        if [ "\$_found" = true ] && [ -s "\$_work" ]; then
+            return 0
+        fi
+        rm -f "\$_work"
+        return 1
+    }
+    # Event-driven loop: wait for trigger files, start Claude with their contents
     while true; do
-        if [ -f "\$TRIGGER_FILE" ]; then
+        if _collect_worker_triggers; then
             WORK_FILE="\$TRIGGER_DIR/${agent}.msg"
-            if ! mv "\$TRIGGER_FILE" "\$WORK_FILE" 2>/dev/null; then
-                continue
-            fi
             printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
             if [ -s "\$WORK_FILE" ]; then
                 TASK_PREVIEW=\$(head -c 50 "\$WORK_FILE")
