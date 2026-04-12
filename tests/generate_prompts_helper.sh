@@ -31,6 +31,7 @@ normalize_provider() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 PROJECT_NAME=$(yq_get '.project.name')
 REPO_NAME=$(yq_get '.project.repo // ""')
 TICKET_SOURCE=$(yq_get '.tickets.source')
+FILE_TICKET_DIR=$(yq_get '.tickets.file.directory // "./tickets"')
 WORKFLOW_PROVIDER=$(normalize_provider "$(yq_get '.runtime.provider // "claude"')")
 [ -z "$WORKFLOW_PROVIDER" ] && WORKFLOW_PROVIDER="claude"
 
@@ -275,6 +276,8 @@ generate_launcher() {
     ALLOWED_TOOLS='${allowed_tools}'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
+    TICKET_SOURCE_KIND='${TICKET_SOURCE}'
+    FILE_TICKET_DIR='${FILE_TICKET_DIR}'
     AGENT_LIST="${_agent_list}"
     CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
     CMD_LIST_READY="${TICKET_LIST_READY}"
@@ -294,15 +297,129 @@ generate_launcher() {
         fi
     }
 
+    _ticket_meta() {
+        awk '
+            BEGIN { in_frontmatter=0; id=""; title=""; status="" }
+            \$0 == "---" {
+                if (in_frontmatter == 0) { in_frontmatter=1; next }
+                exit
+            }
+            in_frontmatter && /^id:[[:space:]]*/ { line=\$0; sub(/^id:[[:space:]]*/, "", line); sub(/[[:space:]]*#.*/, "", line); id=line }
+            in_frontmatter && /^title:[[:space:]]*/ { line=\$0; sub(/^title:[[:space:]]*/, "", line); sub(/[[:space:]]*#.*/, "", line); title=line }
+            in_frontmatter && /^status:[[:space:]]*/ { line=\$0; sub(/^status:[[:space:]]*/, "", line); sub(/[[:space:]]*#.*/, "", line); status=line }
+            END { printf "%s|%s|%s\n", id, title, status }
+        ' "\$1"
+    }
+
+    _resolve_ticket_ref() {
+        local _ref="\$1"
+        [ "\$TICKET_SOURCE_KIND" != "file" ] && { printf '%s\n' "\$_ref"; return 0; }
+        [ -f "\$_ref" ] && { printf '%s\n' "\$_ref"; return 0; }
+        local _f _meta _id
+        for _f in "\$FILE_TICKET_DIR"/*.md; do
+            [ -f "\$_f" ] || continue
+            _meta=\$(_ticket_meta "\$_f")
+            _id=\$(printf '%s' "\$_meta" | cut -d'|' -f1)
+            [ "\$_id" = "\$_ref" ] && { printf '%s\n' "\$_f"; return 0; }
+        done
+        return 1
+    }
+
+    _list_file_tickets() {
+        local _mode="\$1"
+        local _count=0 _f _meta _id _title _status
+        for _f in "\$FILE_TICKET_DIR"/*.md; do
+            [ -f "\$_f" ] || continue
+            _meta=\$(_ticket_meta "\$_f")
+            _id=\$(printf '%s' "\$_meta" | cut -d'|' -f1)
+            _title=\$(printf '%s' "\$_meta" | cut -d'|' -f2)
+            _status=\$(printf '%s' "\$_meta" | cut -d'|' -f3)
+            case "\$_mode" in
+                open) [ "\$_status" = "ready" ] || [ "\$_status" = "in-progress" ] || continue ;;
+                ready) [ "\$_status" = "ready" ] || continue ;;
+                stale) [ "\$_status" = "in-progress" ] || continue ;;
+                *) continue ;;
+            esac
+            printf "  #%s [%s] %s\n" "\$_id" "\$_status" "\$_title"
+            _count=\$((_count + 1))
+        done
+        [ "\$_count" -gt 0 ] || echo "  (no tickets found)"
+    }
+
+    _drain_pm_messages() {
+        _PM_MSG=""
+        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$_tf" ] || continue
+            _PM_MSG="\${_PM_MSG}\$(cat "\$_tf")
+"
+            rm -f "\$_tf"
+        done
+        if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
+            _PM_MSG="\${_PM_MSG}\$(cat "\$TRIGGER_DIR/${agent}.trigger")
+"
+            rm -f "\$TRIGGER_DIR/${agent}.trigger"
+        fi
+        if [ -n "\$_PM_MSG" ]; then
+            printf '%s\n' "ACK \$(date '+%H:%M:%S')" > "\$TRIGGER_DIR/${agent}.ack"
+            echo "\$_PM_MSG"
+        fi
+    }
+
     while true; do
+        _drain_pm_messages
         read -r -p "PM> " INPUT || break
         [ -z "\$INPUT" ] && continue
         case "\$INPUT" in
             help)
-                echo "  status | backlog | view N | close N | claim N | tell agent msg | agents | ai prompt | quit"
+                echo "  status | backlog | view N | close N | claim N | tell agent msg | agents | /bash cmd | ai prompt | quit"
                 ;;
             status)
-                eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "(no tickets)"
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    _list_file_tickets open
+                else
+                    eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "(no tickets)"
+                fi
+                ;;
+            backlog|"show backlog")
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    _list_file_tickets ready
+                else
+                    eval "\$CMD_LIST_READY" 2>/dev/null || echo "(no tickets)"
+                fi
+                ;;
+            stale)
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    _list_file_tickets stale
+                fi
+                ;;
+            view\ *|issue\ *)
+                N=\$(echo "\$INPUT" | sed 's/^[a-z]* #*//' | tr -d ' ')
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "ERROR: could not view ticket \$N"; continue; }
+                    cat "\$TICKET_FILE"
+                fi
+                ;;
+            close\ *|"close issue"\ *)
+                N=\$(echo "\$INPUT" | sed 's/^close *issue *#*//' | sed 's/^close *//' | tr -d ' ')
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "ERROR: could not close ticket \$N"; continue; }
+                    sed -i '' 's/^status: in-progress/status: done/' "\$TICKET_FILE" && echo "Done."
+                fi
+                ;;
+            claim\ *)
+                N=\$(echo "\$INPUT" | sed 's/^claim *#*//' | tr -d ' ')
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "ERROR: could not claim ticket \$N"; continue; }
+                    sed -i '' 's/^status: ready/status: in-progress/' "\$TICKET_FILE" && echo "Done."
+                fi
+                ;;
+            comment\ *)
+                N=\$(echo "\$INPUT" | awk '{print \$2}' | tr -d '#')
+                MSG=\$(echo "\$INPUT" | sed 's/^comment *[#0-9]* *//')
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "ERROR: could not comment on ticket \$N"; continue; }
+                    printf '\n---\n### %s\n%s\n' "\$MSG" "\$(date)" >> "\$TICKET_FILE" && echo "Comment added."
+                fi
                 ;;
             agents|team)
                 for _a in \$AGENT_LIST; do
@@ -327,6 +444,17 @@ generate_launcher() {
                     AGENT_UPPER=\$(echo "\$AGENT" | tr '[:lower:]' '[:upper:]')
                     '${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
                 fi
+                ;;
+            /bash\ *)
+                CMD_RAW=\$(echo "\$INPUT" | sed 's#^/bash *##')
+                [ -z "\$CMD_RAW" ] && echo "ERROR: /bash requires a command" && continue
+                case "\$CMD_RAW" in
+                    status|backlog|stale|agents|team|view*|issue*|close*|claim*|comment*|tell*|ai*)
+                        echo "ERROR: '\$CMD_RAW' is a PM command. Run it without /bash."
+                        continue
+                        ;;
+                esac
+                eval "\$CMD_RAW"
                 ;;
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')

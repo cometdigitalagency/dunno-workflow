@@ -940,6 +940,7 @@ cmd_start() {
     PROJECT_NAME=$(yq_get '.project.name')
     REPO_NAME=$(yq_get '.project.repo')
     TICKET_SOURCE=$(yq_get '.tickets.source')
+    FILE_TICKET_DIR=$(yq_get '.tickets.file.directory // "./tickets"')
     WORKFLOW_PROVIDER=$(normalize_provider "$(yq_get '.runtime.provider // "claude"')")
     [ -z "$WORKFLOW_PROVIDER" ] && WORKFLOW_PROVIDER="claude"
     if ! is_supported_provider "$WORKFLOW_PROVIDER"; then
@@ -1467,6 +1468,8 @@ HELPER
     PROMPT_DIR='${PROMPT_DIR}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+    TICKET_SOURCE_KIND='${TICKET_SOURCE}'
+    FILE_TICKET_DIR='${FILE_TICKET_DIR}'
 
     _provider_exec_prompt() {
         local _prompt="\$1"
@@ -1485,6 +1488,73 @@ HELPER
         fi
     }
 
+    _ticket_meta() {
+        awk '
+            BEGIN { in_frontmatter=0; id=""; title=""; status="" }
+            \$0 == "---" {
+                if (in_frontmatter == 0) { in_frontmatter=1; next }
+                exit
+            }
+            in_frontmatter && /^id:[[:space:]]*/ {
+                line=\$0
+                sub(/^id:[[:space:]]*/, "", line)
+                sub(/[[:space:]]*#.*/, "", line)
+                id=line
+            }
+            in_frontmatter && /^title:[[:space:]]*/ {
+                line=\$0
+                sub(/^title:[[:space:]]*/, "", line)
+                sub(/[[:space:]]*#.*/, "", line)
+                title=line
+            }
+            in_frontmatter && /^status:[[:space:]]*/ {
+                line=\$0
+                sub(/^status:[[:space:]]*/, "", line)
+                sub(/[[:space:]]*#.*/, "", line)
+                status=line
+            }
+            END { printf "%s|%s|%s\n", id, title, status }
+        ' "\$1"
+    }
+
+    _resolve_ticket_ref() {
+        local _ref="\$1"
+        [ "\$TICKET_SOURCE_KIND" != "file" ] && { printf '%s\n' "\$_ref"; return 0; }
+        [ -f "\$_ref" ] && { printf '%s\n' "\$_ref"; return 0; }
+        local _f _meta _id
+        for _f in "\$FILE_TICKET_DIR"/*.md; do
+            [ -f "\$_f" ] || continue
+            _meta=\$(_ticket_meta "\$_f")
+            _id=\$(printf '%s' "\$_meta" | cut -d'|' -f1)
+            if [ "\$_id" = "\$_ref" ]; then
+                printf '%s\n' "\$_f"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    _list_file_tickets() {
+        local _mode="\$1"
+        local _count=0 _f _meta _id _title _status
+        for _f in "\$FILE_TICKET_DIR"/*.md; do
+            [ -f "\$_f" ] || continue
+            _meta=\$(_ticket_meta "\$_f")
+            _id=\$(printf '%s' "\$_meta" | cut -d'|' -f1)
+            _title=\$(printf '%s' "\$_meta" | cut -d'|' -f2)
+            _status=\$(printf '%s' "\$_meta" | cut -d'|' -f3)
+            case "\$_mode" in
+                open) [ "\$_status" = "ready" ] || [ "\$_status" = "in-progress" ] || continue ;;
+                ready) [ "\$_status" = "ready" ] || continue ;;
+                stale) [ "\$_status" = "in-progress" ] || continue ;;
+                *) continue ;;
+            esac
+            printf "  #%s [%s] %s\n" "\$_id" "\$_status" "\$_title"
+            _count=\$((_count + 1))
+        done
+        [ "\$_count" -gt 0 ] || echo "  (no tickets found)"
+    }
+
     AGENT_LIST="${_agent_list}"
     CMD_LIST_OPEN="${TICKET_LIST_OPEN}"
     CMD_LIST_READY="${TICKET_LIST_READY}"
@@ -1499,6 +1569,7 @@ HELPER
     echo "║       ${label}                       ║"
     echo "╠══════════════════════════════════════╣"
     echo "║  Provider: ${provider}               ║"
+    echo "║  Mode: chat-first PM                 ║"
     echo "║  Commands:                           ║"
     echo "║  • status                            ║"
     echo "║  • backlog                           ║"
@@ -1509,12 +1580,13 @@ HELPER
     echo "║  • tell <agent> <msg>                ║"
     echo "║  • agents                            ║"
     echo "║  • stale                             ║"
-    echo "║  • ai <prompt>  (uses provider)      ║"
+    echo "║  • /bash <cmd>                       ║"
+    echo "║  • ai <prompt>  (alias)              ║"
     echo "║  • help                              ║"
     echo "╚══════════════════════════════════════╝"
     echo ""
 
-    (while true; do
+    _drain_pm_messages() {
         _PM_MSG=""
         for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
             [ -f "\$_tf" ] || continue
@@ -1536,26 +1608,18 @@ HELPER
             echo "  \$_PM_MSG"
             echo "═══════════════════════════════════════"
             echo ""
-            printf "PM> "
         fi
-        sleep 2
-    done) &
-    BG_PID=\$!
-    trap "kill \$BG_PID 2>/dev/null" EXIT
-
-    _pm_pause() {
-        echo ""
-        echo "  (press Enter to continue)"
-        read -r -s -n 1 2>/dev/null || true
     }
 
     while true; do
+        _drain_pm_messages
         read -r -p "PM> " INPUT || { sleep 1; continue; }
         [ -z "\$INPUT" ] && continue
 
         case "\$INPUT" in
             help)
                 echo ""
+                echo "  Natural language goes to the provider by default"
                 echo "  status              List open tickets"
                 echo "  backlog             List ready tickets"
                 echo "  view <N>            View ticket #N"
@@ -1565,47 +1629,73 @@ HELPER
                 echo "  tell <agent> <msg>  Send message to an agent"
                 echo "  agents              Show agent statuses"
                 echo "  stale               List stale in-progress tickets"
-                echo "  ai <prompt>         Ask the configured provider"
+                echo "  /bash <cmd>         Run a raw shell command"
+                echo "  ai <prompt>         Ask the configured provider (alias)"
                 echo "  quit                Exit PM"
                 echo ""
                 ;;
             status)
                 echo ""
-                eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "  (no tickets found)"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    _list_file_tickets open
+                else
+                    eval "\$CMD_LIST_OPEN" 2>/dev/null || echo "  (no tickets found)"
+                fi
                 ;;
             backlog|"show backlog")
                 echo ""
-                eval "\$CMD_LIST_READY" 2>/dev/null || echo "  (no ready tickets)"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    _list_file_tickets ready
+                else
+                    eval "\$CMD_LIST_READY" 2>/dev/null || echo "  (no ready tickets)"
+                fi
                 ;;
             stale)
                 echo ""
-                eval "\$CMD_LIST_STALE" 2>/dev/null | jq -r '.[] | "\(.number) \(.title)"' 2>/dev/null || echo "  (no stale tickets)"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    _list_file_tickets stale
+                else
+                    eval "\$CMD_LIST_STALE" 2>/dev/null | jq -r '.[] | "\(.number) \(.title)"' 2>/dev/null || echo "  (no stale tickets)"
+                fi
                 ;;
             view\ *|issue\ *)
                 N=\$(echo "\$INPUT" | sed 's/^[a-z]* #*//' | tr -d ' ')
-                eval "\$(echo "\$CMD_VIEW" | sed "s/\\\$N/\$N/g")" 2>/dev/null || echo "  ERROR: could not view ticket \$N"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "  ERROR: could not view ticket \$N"; continue; }
+                    cat "\$TICKET_FILE" 2>/dev/null || echo "  ERROR: could not view ticket \$N"
+                else
+                    eval "\$(echo "\$CMD_VIEW" | sed "s/\\\$N/\$N/g")" 2>/dev/null || echo "  ERROR: could not view ticket \$N"
+                fi
                 ;;
             close\ *|"close issue"\ *)
                 N=\$(echo "\$INPUT" | sed 's/^close *issue *#*//' | sed 's/^close *//' | tr -d ' ')
                 echo "  Closing ticket #\$N..."
-                eval "\$(echo "\$CMD_CLOSE" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not close ticket \$N"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "  ERROR: could not close ticket \$N"; continue; }
+                    sed -i '' 's/^status: in-progress/status: done/' "\$TICKET_FILE" 2>/dev/null && echo "  Done." || echo "  ERROR: could not close ticket \$N"
+                else
+                    eval "\$(echo "\$CMD_CLOSE" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not close ticket \$N"
+                fi
                 ;;
             claim\ *)
                 N=\$(echo "\$INPUT" | sed 's/^claim *#*//' | tr -d ' ')
                 echo "  Claiming ticket #\$N..."
-                eval "\$(echo "\$CMD_CLAIM" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not claim ticket \$N"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "  ERROR: could not claim ticket \$N"; continue; }
+                    sed -i '' 's/^status: ready/status: in-progress/' "\$TICKET_FILE" 2>/dev/null && echo "  Done." || echo "  ERROR: could not claim ticket \$N"
+                else
+                    eval "\$(echo "\$CMD_CLAIM" | sed "s/\\\$N/\$N/g")" 2>/dev/null && echo "  Done." || echo "  ERROR: could not claim ticket \$N"
+                fi
                 ;;
             comment\ *)
                 N=\$(echo "\$INPUT" | awk '{print \$2}' | tr -d '#')
                 MSG=\$(echo "\$INPUT" | sed 's/^comment *[#0-9]* *//')
-                eval "\$(echo "\$CMD_COMMENT" | sed "s/\\\$N/\$N/g" | sed "s/\\\$MSG/\$MSG/g")" 2>/dev/null && echo "  Comment added." || echo "  ERROR: could not comment on ticket \$N"
-                _pm_pause
+                if [ "\$TICKET_SOURCE_KIND" = "file" ]; then
+                    TICKET_FILE=\$(_resolve_ticket_ref "\$N") || { echo "  ERROR: could not comment on ticket \$N"; continue; }
+                    printf '\n---\n### %s\n%s\n' "\$MSG" "\$(date)" >> "\$TICKET_FILE" 2>/dev/null && echo "  Comment added." || echo "  ERROR: could not comment on ticket \$N"
+                else
+                    eval "\$(echo "\$CMD_COMMENT" | sed "s/\\\$N/\$N/g" | sed "s/\\\$MSG/\$MSG/g")" 2>/dev/null && echo "  Comment added." || echo "  ERROR: could not comment on ticket \$N"
+                fi
                 ;;
             tell\ *)
                 AGENT=\$(echo "\$INPUT" | awk '{print tolower(\$2)}')
@@ -1618,7 +1708,6 @@ HELPER
                     '${PROMPT_DIR}/send-to-agent.sh' "\$AGENT_UPPER" "\$MSG"
                     echo "  Sent to \$AGENT."
                 fi
-                _pm_pause
                 ;;
             agents|team)
                 echo ""
@@ -1638,13 +1727,23 @@ HELPER
                         printf "  %-14s %-10s %s\n" "\$_a" "○ idle" "—"
                     fi
                 done
-                _pm_pause
+                ;;
+            /bash\ *)
+                CMD_RAW=\$(echo "\$INPUT" | sed 's#^/bash *##')
+                [ -z "\$CMD_RAW" ] && echo "  ERROR: /bash requires a command" && continue
+                case "\$CMD_RAW" in
+                    status|backlog|stale|agents|team|view*|issue*|close*|claim*|comment*|tell*|ai*)
+                        echo "  ERROR: '\$CMD_RAW' is a PM command. Run it without /bash."
+                        continue
+                        ;;
+                esac
+                echo ""
+                eval "\$CMD_RAW"
                 ;;
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
                 echo ""
                 _provider_exec_prompt "\$PROMPT"
-                _pm_pause
                 ;;
             quit|exit)
                 echo "  Goodbye."
@@ -1653,7 +1752,6 @@ HELPER
             *)
                 echo ""
                 _provider_exec_prompt "\$INPUT"
-                _pm_pause
                 ;;
         esac
     done
@@ -2239,6 +2337,8 @@ LOGSCRIPT
         as+='tell application "iTerm2"\n'
         as+='    activate\n'
         as+='    set newWindow to (create window with default profile)\n'
+        as+='    set bounds of newWindow to {0, 0, 9999, 9999}\n'
+        as+='    delay 0.2\n'
         as+='    tell newWindow\n'
 
         # Interactive agent (left, full height) — split to create worker column,
@@ -2249,6 +2349,7 @@ LOGSCRIPT
         as+="            set pmSession to it\n"
         as+="            set worker0Session to (split vertically with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[0]}.sh'\")\n"
         as+="        end tell\n"
+        as+="        delay 0.15\n"
 
         # First worker
         local w0_label
@@ -2260,6 +2361,7 @@ LOGSCRIPT
             as+="            set worker1Session to (split vertically with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[1]}.sh'\")\n"
         fi
         as+="        end tell\n"
+        as+="        delay 0.1\n"
 
         # Second worker (right column top)
         if [ "$NUM_WORKERS" -ge 2 ]; then
@@ -2271,6 +2373,7 @@ LOGSCRIPT
                 as+="            set logsSession to (split vertically with default profile command \"bash -l '${PROMPT_DIR}/run-logs.sh'\")\n"
             fi
             as+="        end tell\n"
+            as+="        delay 0.1\n"
 
             if [ "$DEBUG_MODE" = true ]; then
                 as+="        tell logsSession\n"
@@ -2286,6 +2389,7 @@ LOGSCRIPT
             as+="        tell worker0Session\n"
             as+="            set worker2Session to (split horizontally with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[2]}.sh'\")\n"
             as+="        end tell\n"
+            as+="        delay 0.1\n"
             as+="        tell worker2Session\n"
             as+="            set name to \"${w2_label}\"\n"
             as+="        end tell\n"
@@ -2298,6 +2402,7 @@ LOGSCRIPT
             as+="        tell worker1Session\n"
             as+="            set worker3Session to (split horizontally with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[3]}.sh'\")\n"
             as+="        end tell\n"
+            as+="        delay 0.1\n"
             as+="        tell worker3Session\n"
             as+="            set name to \"${w3_label}\"\n"
             as+="        end tell\n"
@@ -2312,14 +2417,20 @@ LOGSCRIPT
             as+="        tell worker${prev_idx}Session\n"
             as+="            set worker${widx}Session to (split horizontally with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[$widx]}.sh'\")\n"
             as+="        end tell\n"
+            as+="        delay 0.1\n"
             as+="        tell worker${widx}Session\n"
             as+="            set name to \"${wn_label}\"\n"
             as+="        end tell\n"
             ((widx++))
         done
-    
+
+        as+="        tell pmSession to select\n"
+        as+="        delay 0.1\n"
+        as+="        tell worker0Session to select\n"
+        as+="        delay 0.1\n"
+        as+="        tell pmSession to select\n"
+        as+="        delay 0.15\n"
         as+="    end tell\n"
-        as+='    set bounds of newWindow to {0, 0, 9999, 9999}\n'
         as+="end tell\n"
     
         printf '%b' "$as"

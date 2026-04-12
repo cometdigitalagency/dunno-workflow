@@ -69,9 +69,16 @@ launcher() {
     grep -q 'help)' "$(launcher pm)"
 }
 
+@test "pm-repl: PM supports explicit /bash command" {
+    generate_all "startup-team-codex.yaml"
+    grep -q '/bash' "$(launcher pm)"
+    grep -q 'CMD_RAW=' "$(launcher pm)"
+}
+
 @test "pm-repl: PM has LLM fallback" {
     generate_all "startup-team.yaml"
-    grep -q 'claude -p' "$(launcher pm)"
+    grep -Fq '_provider_exec_prompt()' "$(launcher pm)"
+    grep -Fq '_provider_exec_prompt "$INPUT"' "$(launcher pm)"
 }
 
 @test "pm-repl: Codex provider uses codex exec" {
@@ -89,6 +96,12 @@ launcher() {
 @test "pm-repl: PM does NOT use exec claude" {
     generate_all "startup-team.yaml"
     ! grep -q 'exec claude' "$(launcher pm)"
+}
+
+@test "pm-repl: PM no longer uses pause helper" {
+    generate_all "startup-team-codex.yaml"
+    ! grep -q '_pm_pause' "$(launcher pm)"
+    ! grep -q 'press Enter to continue' "$(launcher pm)"
 }
 
 # ── PM agents command checks trigger files ──
