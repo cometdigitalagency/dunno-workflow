@@ -458,11 +458,15 @@ analyze_session_crashes() {
 
 analyze_permission_blocks() {
     local log_dir="$1"
+    # Skip interactive agent — permission blocks are expected (limited --allowedTools by design)
+    local interactive_agent
+    interactive_agent=$(yq '.agents | to_entries[] | select(.value.interactive == true) | .key' workflow.yaml 2>/dev/null) || true
     # Match actual tool permission denials from Claude CLI, not conversational mentions
     local perm_pattern="tool use was blocked\|not allowed to use\|Tool .* is not permitted\|User denied tool"
     for logfile in "$log_dir"/*.log; do
         local agent
         agent=$(basename "$logfile" .log)
+        [ -n "$interactive_agent" ] && [ "$agent" = "$interactive_agent" ] && continue
         if grep -qai "$perm_pattern" "$logfile" 2>/dev/null; then
             local perm_lines
             perm_lines=$(grep -ai "$perm_pattern" "$logfile" | head -3)
@@ -2097,7 +2101,7 @@ LOGSCRIPT
         # Launch scripts in each pane
         as+="\n        -- Launch agents\n"
         as+="        tell current session\n"
-        as+="            write text \"'${PROMPT_DIR}/run-${INTERACTIVE_AGENT}.sh'\"\n"
+        as+="            write text \"${PROMPT_DIR}/run-${INTERACTIVE_AGENT}.sh\"\n"
         as+="        end tell\n"
     
         for i in "${!WORKER_AGENTS[@]}"; do
@@ -2109,13 +2113,13 @@ LOGSCRIPT
             else
                 as+="        tell worker${i}Session\n"
             fi
-            as+="            write text \"'${PROMPT_DIR}/run-${w}.sh'\"\n"
+            as+="            write text \"${PROMPT_DIR}/run-${w}.sh\"\n"
             as+="        end tell\n"
         done
     
         if [ "$DEBUG_MODE" = true ] && [ "$NUM_WORKERS" -ge 2 ]; then
             as+="        tell logsSession\n"
-            as+="            write text \"'${PROMPT_DIR}/run-logs.sh'\"\n"
+            as+="            write text \"${PROMPT_DIR}/run-logs.sh\"\n"
             as+="        end tell\n"
         fi
     
