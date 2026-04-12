@@ -155,6 +155,24 @@ setup_analyze() {
     [[ "$output" != *"PERMISSION BLOCKED"* ]]
 }
 
+# ── Issue #9: ANSI escape sequences must not trigger false SESSION CRASH ──
+
+@test "analyze: no false SESSION CRASH from ANSI color codes in logs" {
+    # ANSI escape sequences (bold, color, reset) should not be misinterpreted
+    # as error traces by the crash detector (issue #9)
+    TEST_WORK_DIR="$(mktemp -d)"
+    mkdir -p "$TEST_WORK_DIR/.team-logs/test-session"
+    printf 'Session started\n\033[1;31mERROR_HIGHLIGHT\033[0m but not a real error\n' \
+        > "$TEST_WORK_DIR/.team-logs/test-session/backend.log"
+    printf 'Session started\n\033[0K\033[2J Screen clear\nTask completed\n' \
+        > "$TEST_WORK_DIR/.team-logs/test-session/pm.log"
+    printf 'Session started\nAll good\n' \
+        > "$TEST_WORK_DIR/.team-logs/test-session/architect.log"
+    run run_in_dir "$TEST_WORK_DIR" analyze --session test-session --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"SESSION CRASH"* ]]
+}
+
 # ── Archive after issue creation ──
 
 @test "analyze: archives session logs after creating issues" {
