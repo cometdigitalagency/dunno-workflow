@@ -436,13 +436,15 @@ analyze_done_delivery() {
 
 analyze_session_crashes() {
     local log_dir="$1"
+    # Match real crash signatures, not conversational mentions of "error"
+    local crash_pattern="Traceback (most recent\|FATAL\|segfault\|Segmentation fault\|panic:\|Unhandled exception\|Session crashed\|claude: error\|SIGTERM\|SIGKILL\|killed by signal"
+    local exclude_pattern="error handling\|error_rate\|ErrorTracker\|fix.*error\|no error\|error message\|error code\|error log\|error in\|errors found"
     for logfile in "$log_dir"/*.log; do
         local agent
         agent=$(basename "$logfile" .log)
-        # Look for error traces
-        if grep -qai "error\|traceback\|exception\|panic\|segfault" "$logfile" 2>/dev/null; then
+        if grep -qai "$crash_pattern" "$logfile" 2>/dev/null; then
             local err_lines
-            err_lines=$(grep -ai "error\|traceback\|exception" "$logfile" | grep -avi "ErrorTracker\|error_rate\|error handling" | head -3)
+            err_lines=$(grep -ai "$crash_pattern" "$logfile" | grep -avi "$exclude_pattern" | head -3)
             if [ -n "$err_lines" ]; then
                 _add_finding "ERROR" \
                     "SESSION CRASH: ${agent} has error traces in log" \
@@ -456,12 +458,14 @@ analyze_session_crashes() {
 
 analyze_permission_blocks() {
     local log_dir="$1"
+    # Match actual tool permission denials from Claude CLI, not conversational mentions
+    local perm_pattern="tool use was blocked\|permission denied.*tool\|not allowed to use\|Tool .* is not permitted\|--allowedTools\|requires permission\|User denied tool"
     for logfile in "$log_dir"/*.log; do
         local agent
         agent=$(basename "$logfile" .log)
-        if grep -qai "permission\|not allowed\|denied\|blocked" "$logfile" 2>/dev/null; then
+        if grep -qai "$perm_pattern" "$logfile" 2>/dev/null; then
             local perm_lines
-            perm_lines=$(grep -ai "permission\|not allowed\|denied\|blocked" "$logfile" | head -3)
+            perm_lines=$(grep -ai "$perm_pattern" "$logfile" | head -3)
             _add_finding "ERROR" \
                 "PERMISSION BLOCKED: ${agent} was denied tool access" \
                 "Check --allowedTools configuration for this agent" \
@@ -550,16 +554,21 @@ _gh_api() {
 }
 
 _ensure_labels() {
-    local repo="$1"
+    local repo="$1" project_label="$2"
     # Create labels if they don't exist (ignore errors if they already exist)
     _gh_api POST "/repos/${repo}/labels" '{"name":"auto-detected","color":"D93F0B","description":"Auto-detected by dunno-workflow analyze"}' >/dev/null 2>&1 || true
     _gh_api POST "/repos/${repo}/labels" '{"name":"bug","color":"D73A4A","description":"Something isn'"'"'t working"}' >/dev/null 2>&1 || true
+    if [ -n "$project_label" ]; then
+        _gh_api POST "/repos/${repo}/labels" \
+            "{\"name\":\"project:${project_label}\",\"color\":\"1D76DB\",\"description\":\"Source project: ${project_label}\"}" \
+            >/dev/null 2>&1 || true
+    fi
 }
 
 _create_issue() {
-    local title="$1" body="$2" dry_run="$3"
+    local title="$1" body="$2" dry_run="$3" project_label="$4"
     if [ "$dry_run" = true ]; then
-        echo "  [DRY RUN] Would create: \"Bug: ${title}\""
+        echo "  [DRY RUN] Would create: \"Bug: ${title}\" [project:${project_label:-unknown}]"
         return 0
     fi
 
@@ -570,7 +579,7 @@ _create_issue() {
     fi
 
     # Ensure labels exist
-    _ensure_labels "$ANALYZE_REPORT_REPO"
+    _ensure_labels "$ANALYZE_REPORT_REPO" "$project_label"
 
     # Dedup: check if matching issue already exists
     local existing
@@ -586,9 +595,15 @@ _create_issue() {
     local json_title
     json_title=$(printf '%s' "Bug: ${title}" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "Bug: ${title}")
 
+    # Build labels array
+    local labels_json='"bug","auto-detected"'
+    if [ -n "$project_label" ]; then
+        labels_json="${labels_json},\"project:${project_label}\""
+    fi
+
     local response
     response=$(_gh_api POST "/repos/${ANALYZE_REPORT_REPO}/issues" \
-        "{\"title\":${json_title},\"body\":${json_body},\"labels\":[\"bug\",\"auto-detected\"]}") || {
+        "{\"title\":${json_title},\"body\":${json_body},\"labels\":[${labels_json}]}") || {
         echo "  ⚠️  Failed to create issue (check GITHUB_TOKEN permissions)"
         return 1
     }
@@ -623,7 +638,7 @@ cmd_analyze() {
     fi
 
     if [ -z "$SESSION" ]; then
-        SESSION=$(ls -1t "$LOG_BASE" 2>/dev/null | head -1)
+        SESSION=$(ls -1t "$LOG_BASE" 2>/dev/null | grep -v '^archived$' | head -1)
     fi
     if [ -z "$SESSION" ] || [ ! -d "$LOG_BASE/$SESSION" ]; then
         echo "ERROR: No log sessions found in .team-logs/"
@@ -662,9 +677,11 @@ cmd_analyze() {
     echo ""
 
     # Read project context
-    local source_repo=""
+    local source_repo="" project_name="" workflow_content=""
     if [ -f "workflow.yaml" ]; then
         source_repo=$(yq '.project.repo // ""' workflow.yaml 2>/dev/null)
+        project_name=$(yq '.project.name // ""' workflow.yaml 2>/dev/null)
+        workflow_content=$(cat "workflow.yaml")
     fi
 
     # Create issues from findings
@@ -697,11 +714,38 @@ ${evidence}
 ${expected}
 
 ### Labels
-\`bug\`, \`auto-detected\`"
+\`bug\`, \`auto-detected\`${project_name:+, \`project:${project_name}\`}"
 
-        _create_issue "$title" "$body" "$DRY_RUN"
+        # Append workflow.yaml if available
+        if [ -n "$workflow_content" ]; then
+            body="${body}
+
+<details>
+<summary>workflow.yaml</summary>
+
+\`\`\`yaml
+${workflow_content}
+\`\`\`
+
+</details>"
+        fi
+
+        _create_issue "$title" "$body" "$DRY_RUN" "$project_name"
     done
     echo ""
+
+    # Archive the session logs after issues have been created
+    if [ "$DRY_RUN" = false ]; then
+        local archive_dir="$LOG_BASE/archived"
+        mkdir -p "$archive_dir"
+        mv "$LOG_DIR" "$archive_dir/"
+        if [ -f "workflow.yaml" ]; then
+            cp "workflow.yaml" "$archive_dir/$SESSION/workflow.yaml"
+        fi
+        echo "  Archived: $LOG_DIR → $archive_dir/$SESSION"
+        echo ""
+    fi
+
     return 0
 }
 
