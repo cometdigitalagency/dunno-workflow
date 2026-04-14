@@ -385,11 +385,11 @@ LAUNCHER
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
     _collect_triggers() {
         local _collected=""
-        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
-            [ -f "\$_tf" ] || continue
-            _collected="\${_collected}\$(cat "\$_tf")
+        for TRIGGER_FILE in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$TRIGGER_FILE" ] || continue
+            _collected="\${_collected}\$(cat "\$TRIGGER_FILE")
 "
-            rm -f "\$_tf"
+            rm -f "\$TRIGGER_FILE"
         done
         if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
             _collected="\${_collected}\$(cat "\$TRIGGER_DIR/${agent}.trigger")

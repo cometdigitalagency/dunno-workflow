@@ -1550,11 +1550,11 @@ LAUNCHER
     _collect_triggers() {
         local _collected=""
         # Per-sender trigger files
-        for _tf in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
-            [ -f "\$_tf" ] || continue
-            _collected="\${_collected}\$(cat "\$_tf")
+        for TRIGGER_FILE in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
+            [ -f "\$TRIGGER_FILE" ] || continue
+            _collected="\${_collected}\$(cat "\$TRIGGER_FILE")
 "
-            rm -f "\$_tf"
+            rm -f "\$TRIGGER_FILE"
         done
         # Legacy single trigger file (backward compat)
         if [ -f "\$TRIGGER_DIR/${agent}.trigger" ]; then
