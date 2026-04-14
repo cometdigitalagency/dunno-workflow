@@ -259,18 +259,18 @@ launcher() {
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" API "TASK: build endpoint"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" WEB "TASK: build ui"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" REVIEWER "REVIEW-REQUEST: check code"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/api.trigger" ]
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/web.trigger" ]
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/reviewer.trigger" ]
+    ls "$TEST_WORK_DIR/.team-prompts/triggers/api.from-"*.trigger >/dev/null 2>&1
+    ls "$TEST_WORK_DIR/.team-prompts/triggers/web.from-"*.trigger >/dev/null 2>&1
+    ls "$TEST_WORK_DIR/.team-prompts/triggers/reviewer.from-"*.trigger >/dev/null 2>&1
 }
 
 @test "send: bidirectional impl can send to verifier and vice versa" {
     generate_all "bidirectional.yaml"
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" VERIFIER "DONE-impl: finished"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/verifier.trigger" ]
-    rm "$TEST_WORK_DIR/.team-prompts/triggers/verifier.trigger"
+    ls "$TEST_WORK_DIR/.team-prompts/triggers/verifier.from-"*.trigger >/dev/null 2>&1
+    rm -f "$TEST_WORK_DIR/.team-prompts/triggers/verifier.from-"*.trigger
     "$TEST_WORK_DIR/.team-prompts/send-to-agent.sh" IMPL "BUG: test failure"
-    [ -f "$TEST_WORK_DIR/.team-prompts/triggers/impl.trigger" ]
+    ls "$TEST_WORK_DIR/.team-prompts/triggers/impl.from-"*.trigger >/dev/null 2>&1
 }
 
 @test "send: DONE message creates done-sent marker across fixtures" {
