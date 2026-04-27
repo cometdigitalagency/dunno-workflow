@@ -762,7 +762,7 @@ cmd_stop() {
     done
     names+="\"LOGS\""
     osascript << ENDSCRIPT 2>/dev/null || true
-tell application "iTerm2"
+tell application "iTerm"
     set agentNames to {${names}}
     repeat with w in windows
         repeat with t in tabs of w
@@ -1016,8 +1016,17 @@ cmd_start() {
         IS_WORKER=false
     fi
 
-    if [ "$IS_WORKER" = true ]; then
-        # Worker agent: trigger file is the primary mechanism, just nudge the pane
+    # PM has a background trigger watcher and REPL. Typing multiline messages into
+    # its pane causes each line to be interpreted as fresh user input, so PM should
+    # receive trigger files only.
+    if [ -f "$LAUNCHER" ] && grep -q "INCOMING MESSAGE" "$LAUNCHER" 2>/dev/null; then
+        IS_TRIGGER_ONLY=true
+    else
+        IS_TRIGGER_ONLY=false
+    fi
+
+    if [ "$IS_WORKER" = true ] || [ "$IS_TRIGGER_ONLY" = true ]; then
+        # Worker agents and the PM REPL consume trigger files directly.
         PANE_TEXT=""
     else
         # Interactive/auto_start agent: type the full message into the pane
@@ -1035,7 +1044,7 @@ cmd_start() {
 
     deliver_to_pane() {
         osascript << EOF 2>&1 || true
-    tell application "iTerm2"
+    tell application "iTerm"
         repeat with w in windows
             repeat with t in tabs of w
                 repeat with s in sessions of t
@@ -1058,7 +1067,7 @@ EOF
 
     # Wait for receiver to ACK (max 30s) — only for workers with polling loops.
     # Interactive/auto_start agents don't write ACK files.
-    if [ "$IS_WORKER" = true ]; then
+    if [ "$IS_WORKER" = true ] || [ "$IS_TRIGGER_ONLY" = true ]; then
         if [ "$RESULT" = "not_found" ]; then
             echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
         fi
@@ -1219,13 +1228,33 @@ HELPER
             prompt+="This ensures PM gets notified even if your session ends unexpectedly.\n\n"
         fi
 
+        # Shared completion policy for all non-interactive agents
+        if [ "$interactive" != "true" ]; then
+            prompt+="## DEFINITION OF DONE\n"
+            prompt+="- Do NOT report done based only on code changes or unit tests.\n"
+            prompt+="- Document required services, env vars, migrations, seed data, and startup steps relevant to your task.\n"
+            prompt+="- Include the exact commands you used to verify the change.\n"
+            prompt+="- If the task depends on infrastructure that is unavailable or unverifiable, report BLOCKED with the exact missing prerequisite.\n"
+            prompt+="- Only send DONE when the work, documentation, and verification evidence are all in place.\n\n"
+        fi
+
         # Important rules for event-driven agents
         if [ "$interactive" != "true" ]; then
             prompt+="## IMPORTANT\n"
             prompt+="- If the PM sends you a message (stop, pause, status), handle it immediately.\n"
             prompt+="- ALWAYS post your done marker on the ticket when you finish your tasks.\n"
         fi
-    
+
+        # Status update instructions for non-interactive agents
+        if [ "$interactive" != "true" ]; then
+            local state_file_path="${PROMPT_DIR}/triggers/${agent}.state"
+            prompt+="\n## STATUS UPDATES\n"
+            prompt+="Update your own status by writing to your state file:\n"
+            prompt+="  echo \"thinking \$(date +%s)\" > ${state_file_path}      # deep analysis\n"
+            prompt+="  echo \"waitinginput \$(date +%s)\" > ${state_file_path}   # when asking user\n"
+            prompt+="  echo \"retrying \$(date +%s)\" > ${state_file_path}       # after transient error\n\n"
+        fi
+
         printf '%b' "$prompt" > "$PROMPT_DIR/${agent}-system.txt"
     }
     
@@ -1485,21 +1514,42 @@ HELPER
                 ;;
             agents|team)
                 echo ""
-                printf "  %-14s %-10s %s\n" "AGENT" "STATUS" "DURATION"
-                printf "  %-14s %-10s %s\n" "─────" "──────" "────────"
+                printf "  %-14s %-2s %-13s %-10s %s\n" "AGENT" "" "STATUS" "DURATION" "PREVIEW"
+                printf "  %-14s %-2s %-13s %-10s %s\n" "─────" "" "──────" "────────" "───────"
+                _now=\$(date +%s)
                 for _a in \$AGENT_LIST; do
-                    if [ -f "\$TRIGGER_DIR/\${_a}.msg" ]; then
-                        _elapsed=\$(( \$(date +%s) - \$(stat -f %m "\$TRIGGER_DIR/\${_a}.msg") ))
-                        _min=\$(( _elapsed / 60 ))
-                        _sec=\$(( _elapsed % 60 ))
-                        printf "  %-14s %-10s %sm %ss\n" "\$_a" "● working" "\$_min" "\$_sec"
-                    elif [ -f "\$TRIGGER_DIR/\${_a}.trigger" ] || ls "\$TRIGGER_DIR/\${_a}".from-*.trigger >/dev/null 2>&1; then
-                        printf "  %-14s %-10s %s\n" "\$_a" "◉ pending" "—"
-                    elif [ -f "\$TRIGGER_DIR/\${_a}.done-sent" ]; then
-                        printf "  %-14s %-10s %s\n" "\$_a" "✓ done" "—"
-                    else
-                        printf "  %-14s %-10s %s\n" "\$_a" "○ idle" "—"
+                    _state_file="\$TRIGGER_DIR/\${_a}.state"
+                    _status="idle"
+                    _duration="—"
+                    _preview=""
+                    _icon="○"
+                    if [ -f "\$_state_file" ]; then
+                        _content=\$(cat "\$_state_file")
+                        _status=\$(echo "\$_content" | awk '{print \$1}')
+                        _ts=\$(echo "\$_content" | awk '{print \$2}')
+                        _preview=\$(echo "\$_content" | cut -d' ' -f3- | cut -c1-30)
+                        if [ -n "\$_ts" ] && echo "\$_ts" | grep -qE '^[0-9]+\$'; then
+                            _elapsed=\$(( _now - _ts ))
+                            _min=\$(( _elapsed / 60 ))
+                            _sec=\$(( _elapsed % 60 ))
+                            _duration="\${_min}m \${_sec}s"
+                            if [ "\$_status" != "idle" ] && [ "\$_status" != "offline" ] && [ "\$_elapsed" -gt 300 ]; then
+                                _status="offline"
+                            fi
+                        fi
                     fi
+                    [ "\$_status" = "working" ] && _status="running"
+                    case "\$_status" in
+                        idle)          _icon="○" ;;
+                        running)       _icon="●" ;;
+                        thinking)      _icon="◌" ;;
+                        waitinginput)  _icon="◎" ;;
+                        error)         _icon="✗" ;;
+                        retrying)      _icon="↺" ;;
+                        offline)       _icon="■" ;;
+                        *)             _icon="○" ;;
+                    esac
+                    printf "  %-14s %s  %-13s %-10s %s\n" "\$_a" "\$_icon" "\$_status" "\$_duration" "\$_preview"
                 done
                 _pm_pause
                 ;;
@@ -1569,15 +1619,21 @@ LAUNCHER
         # Check for pending trigger files (messages arrived while session was down)
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
-            echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
+            echo "running \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            _CLAUDE_EXIT=\$?
         else
-            echo "working \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+            echo "running \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
             claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+            _CLAUDE_EXIT=\$?
         fi
         echo ""
-        echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+        if [ "\$_CLAUDE_EXIT" -ne 0 ]; then
+            echo "error \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+        else
+            echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+        fi
         echo "--- [\$(date '+%H:%M:%S')] Session ended. Restarting in 5s... ---"
         # Auto-notify: guarantee COMPLETE reaches PM if session ended after work was done
         COMPLETE_MARKER="\$TRIGGER_DIR/.work-done"
@@ -1649,7 +1705,7 @@ LAUNCHER
 
             if [ -s "\$WORK_FILE" ]; then
                 TASK_PREVIEW=\$(head -c 50 "\$WORK_FILE")
-                echo "working \$(date +%s) \$TASK_PREVIEW" > "\$TRIGGER_DIR/${agent}.state"
+                echo "running \$(date +%s) \$TASK_PREVIEW" > "\$TRIGGER_DIR/${agent}.state"
                 PREVIEW=\$(head -c 200 "\$WORK_FILE")
                 echo ""
                 echo "--- [\$(date '+%H:%M:%S')] Received message (\$(wc -c < "\$WORK_FILE" | tr -d ' ') bytes) ---"
@@ -1659,6 +1715,7 @@ LAUNCHER
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
                 # Pipe from file to avoid CLI argument length limits on long messages
                 cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                _CLAUDE_EXIT=\$?
                 echo ""
                 # Auto-notify: only send DONE if the agent didn't already send it
                 if [ ! -f "\$TRIGGER_DIR/${agent}.done-sent" ]; then
@@ -1668,7 +1725,11 @@ LAUNCHER
                     echo "--- [\$(date '+%H:%M:%S')] Agent already sent DONE — skipping auto-notify ---"
                 fi
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
-                echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+                if [ "\$_CLAUDE_EXIT" -ne 0 ]; then
+                    echo "error \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+                else
+                    echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+                fi
                 echo "--- [\$(date '+%H:%M:%S')] Session ended. Waiting for next message... ---"
                 echo ""
             else
@@ -1714,7 +1775,7 @@ LAUNCHER
     CLEANUP_NAMES+="\"LOGS\""
     
     osascript << ENDSCRIPT 2>/dev/null || true
-    tell application "iTerm2"
+    tell application "iTerm"
         set agentNames to {${CLEANUP_NAMES}}
         repeat with w in windows
             repeat with t in tabs of w
@@ -1885,13 +1946,15 @@ ENDSCRIPT
             status = "idle"
             duration = "—"
             task_preview = ""
+            state_ts = 0
             if os.path.exists(state_file):
                 try:
                     content = open(state_file).read().strip()
                     parts = content.split(" ", 2)
                     status = parts[0] if parts else "idle"
                     if len(parts) >= 2:
-                        elapsed = int(now - int(parts[1]))
+                        state_ts = int(parts[1])
+                        elapsed = int(now - state_ts)
                         em, es = divmod(elapsed, 60)
                         duration = f"{em}m {es:02d}s"
                     if len(parts) >= 3:
@@ -1902,21 +1965,36 @@ ENDSCRIPT
             msg_file = os.path.join(TRIGGER_DIR, f"{agent}.msg")
             trigger_file = os.path.join(TRIGGER_DIR, f"{agent}.trigger")
             done_file = os.path.join(TRIGGER_DIR, f"{agent}.done-sent")
-            if os.path.exists(msg_file) and status != "working":
-                status = "working"
+            # Normalize legacy "working" status
+            if status == "working":
+                status = "running"
+            # Offline detection: active status with stale timestamp (>300s)
+            if status not in ("idle", "offline") and state_ts > 0:
+                if int(now - state_ts) > 300:
+                    status = "offline"
+            if os.path.exists(msg_file) and status not in ("running", "thinking", "waitinginput", "retrying"):
+                status = "running"
             if os.path.exists(done_file):
                 done_count += 1
-            if status == "working":
+            # Status icon and color mapping for all 7 statuses
+            status_map = {
+                "idle":         ("○", ""),
+                "running":      ("●", COLORS.get(agent, "\033[32m")),
+                "thinking":     ("◌", "\033[36m"),
+                "waitinginput": ("◎", "\033[33m"),
+                "error":        ("✗", "\033[31m"),
+                "retrying":     ("↺", "\033[33m"),
+                "offline":      ("■", "\033[90m"),
+            }
+            if status in ("running", "thinking", "waitinginput", "retrying"):
                 working_count += 1
-                icon = "●"
-                color = COLORS.get(agent, "")
-            elif os.path.exists(trigger_file) or glob.glob(os.path.join(TRIGGER_DIR, f"{agent}.from-*.trigger")):
-                pending_count += 1
-                icon = "◉"
-                color = "\033[33m"
-            else:
-                icon = "○"
-                color = ""
+            if os.path.exists(trigger_file) or glob.glob(os.path.join(TRIGGER_DIR, f"{agent}.from-*.trigger")):
+                if status not in ("running", "thinking", "waitinginput", "retrying"):
+                    pending_count += 1
+                    status = "pending"
+            icon, color = status_map.get(status, ("○", ""))
+            if status == "pending":
+                icon, color = "◉", "\033[33m"
             label = LABELS.get(agent, agent.upper())
             task_str = f"  {task_preview}" if task_preview else ""
             lines.append(f"│  {color}{label:<10}{RESET} {icon} {status:<10} {duration:<10}{task_str:<28}│")
@@ -2071,7 +2149,7 @@ LOGSCRIPT
     # Build the AppleScript dynamically
     build_applescript() {
         local as=""
-        as+='tell application "iTerm2"\n'
+        as+='tell application "iTerm"\n'
         as+='    activate\n'
         as+='    set newWindow to (create window with default profile)\n'
         as+='    tell newWindow\n'
@@ -2082,7 +2160,7 @@ LOGSCRIPT
         int_label=$(echo "$INTERACTIVE_AGENT" | tr '[:lower:]' '[:upper:]')
         as+="        tell current session\n"
         as+="            set pmSession to it\n"
-        as+="            set worker0Session to (split vertically with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[0]}.sh'\")\n"
+        as+="            set worker0Session to (split vertically with default profile)\n"
         as+="        end tell\n"
 
         # First worker
@@ -2092,7 +2170,7 @@ LOGSCRIPT
         as+="            set name to \"${w0_label}\"\n"
     
         if [ "$NUM_WORKERS" -ge 2 ]; then
-            as+="            set worker1Session to (split vertically with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[1]}.sh'\")\n"
+            as+="            set worker1Session to (split vertically with default profile)\n"
         fi
         as+="        end tell\n"
 
@@ -2103,7 +2181,7 @@ LOGSCRIPT
             as+="        tell worker1Session\n"
             as+="            set name to \"${w1_label}\"\n"
             if [ "$DEBUG_MODE" = true ]; then
-                as+="            set logsSession to (split vertically with default profile command \"bash -l '${PROMPT_DIR}/run-logs.sh'\")\n"
+                as+="            set logsSession to (split vertically with default profile)\n"
             fi
             as+="        end tell\n"
 
@@ -2119,7 +2197,7 @@ LOGSCRIPT
             local w2_label
             w2_label=$(echo "${WORKER_AGENTS[2]}" | tr '[:lower:]' '[:upper:]')
             as+="        tell worker0Session\n"
-            as+="            set worker2Session to (split horizontally with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[2]}.sh'\")\n"
+            as+="            set worker2Session to (split horizontally with default profile)\n"
             as+="        end tell\n"
             as+="        tell worker2Session\n"
             as+="            set name to \"${w2_label}\"\n"
@@ -2131,7 +2209,7 @@ LOGSCRIPT
             local w3_label
             w3_label=$(echo "${WORKER_AGENTS[3]}" | tr '[:lower:]' '[:upper:]')
             as+="        tell worker1Session\n"
-            as+="            set worker3Session to (split horizontally with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[3]}.sh'\")\n"
+            as+="            set worker3Session to (split horizontally with default profile)\n"
             as+="        end tell\n"
             as+="        tell worker3Session\n"
             as+="            set name to \"${w3_label}\"\n"
@@ -2145,13 +2223,29 @@ LOGSCRIPT
             wn_label=$(echo "${WORKER_AGENTS[$widx]}" | tr '[:lower:]' '[:upper:]')
             prev_idx=$((widx - 2))
             as+="        tell worker${prev_idx}Session\n"
-            as+="            set worker${widx}Session to (split horizontally with default profile command \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[$widx]}.sh'\")\n"
+            as+="            set worker${widx}Session to (split horizontally with default profile)\n"
             as+="        end tell\n"
             as+="        tell worker${widx}Session\n"
             as+="            set name to \"${wn_label}\"\n"
             as+="        end tell\n"
             ((widx++))
         done
+
+        local launch_idx launch_label
+        launch_idx=0
+        while [ $launch_idx -lt "$NUM_WORKERS" ]; do
+            launch_label=$(printf '%s' "${WORKER_AGENTS[$launch_idx]}" | tr '[:lower:]' '[:upper:]')
+            as+="        tell worker${launch_idx}Session\n"
+            as+="            write text \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[$launch_idx]}.sh'\"\n"
+            as+="        end tell\n"
+            ((launch_idx++))
+        done
+
+        if [ "$DEBUG_MODE" = true ] && [ "$NUM_WORKERS" -ge 2 ]; then
+            as+="        tell logsSession\n"
+            as+="            write text \"bash -l '${PROMPT_DIR}/run-logs.sh'\"\n"
+            as+="        end tell\n"
+        fi
     
         as+="    end tell\n"
         as+='    set bounds of newWindow to {0, 0, 9999, 9999}\n'
@@ -2170,7 +2264,7 @@ LOGSCRIPT
     w0_label=$(echo "${WORKER_AGENTS[0]}" | tr '[:lower:]' '[:upper:]')
     sleep 3
     osascript << PMSCRIPT 2>/dev/null
-tell application "iTerm2"
+tell application "iTerm"
     -- Target the front window (most recently created/activated by build_applescript)
     tell front window
         tell current tab
