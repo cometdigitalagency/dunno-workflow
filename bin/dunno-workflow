@@ -756,28 +756,7 @@ ${workflow_content}
 
 cmd_stop() {
     echo "Stopping agent sessions..."
-    local names=""
-    for agent in $(yq '.agents | keys | .[]' workflow.yaml 2>/dev/null || echo "PM ARCHITECT BACKEND FRONTEND QA"); do
-        names+="\"$(echo "$agent" | tr '[:lower:]' '[:upper:]')\", "
-    done
-    names+="\"LOGS\""
-    osascript << ENDSCRIPT 2>/dev/null || true
-tell application "iTerm"
-    set agentNames to {${names}}
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                if name of s is in agentNames then
-                    tell s
-                        write text (ASCII character 3)
-                        write text "exit"
-                    end tell
-                end if
-            end repeat
-        end repeat
-    end repeat
-end tell
-ENDSCRIPT
+    tmux kill-session -t dunno-agents 2>/dev/null || true
     echo "Done."
 }
 
@@ -1043,24 +1022,14 @@ cmd_start() {
     fi
 
     deliver_to_pane() {
-        osascript << EOF 2>&1 || true
-    tell application "iTerm"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    set sessionName to name of s
-                    if sessionName contains "$AGENT_NAME" then
-                        tell s
-                            write text "$PANE_TEXT"
-                        end tell
-                        return "sent"
-                    end if
-                end repeat
-            end repeat
-        end repeat
-        return "not_found"
-    end tell
-EOF
+        local pane_id
+        pane_id=$(cat "$TRIGGER_DIR/${AGENT_NAME}.pane" 2>/dev/null)
+        if [ -z "$pane_id" ]; then
+            echo "not_found"
+            return
+        fi
+        tmux send-keys -t "$pane_id" "$PANE_TEXT" Enter 2>/dev/null \
+            && echo "sent" || echo "not_found"
     }
 
     RESULT=$(deliver_to_pane)
@@ -1069,7 +1038,7 @@ EOF
     # Interactive/auto_start agents don't write ACK files.
     if [ "$IS_WORKER" = true ] || [ "$IS_TRIGGER_ONLY" = true ]; then
         if [ "$RESULT" = "not_found" ]; then
-            echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
+            echo "WARNING: tmux pane for '${AGENT_NAME}' not found (trigger file still delivered)" >&2
         fi
         ACK_FILE="$TRIGGER_DIR/${AGENT_NAME}.ack"
         WAIT=0
@@ -1090,14 +1059,14 @@ EOF
         MAX_ATTEMPTS=3
         while [ "$RESULT" = "not_found" ] && [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            echo "WARNING: iTerm2 pane for '${AGENT_NAME}' not found — retry $ATTEMPT/$MAX_ATTEMPTS in 3s (trigger file persists as fallback)" >&2
+            echo "WARNING: tmux pane for '${AGENT_NAME}' not found — retry $ATTEMPT/$MAX_ATTEMPTS in 3s (trigger file persists as fallback)" >&2
             sleep 3
             RESULT=$(deliver_to_pane)
         done
         if [ "$RESULT" = "not_found" ]; then
-            echo "ERROR: iTerm2 pane for '${AGENT_NAME}' not found after $MAX_ATTEMPTS attempts (trigger file persists as fallback)" >&2
+            echo "ERROR: tmux pane for '${AGENT_NAME}' not found after $MAX_ATTEMPTS attempts (trigger file persists as fallback)" >&2
         else
-            echo "--- [$(date '+%H:%M:%S')] Message typed into ${AGENT_NAME} pane ---"
+            echo "--- [$(date '+%H:%M:%S')] Message sent to ${AGENT_NAME} pane ---"
         fi
     fi
 HELPER
@@ -1767,31 +1736,9 @@ LAUNCHER
     # Remove stale trigger files from previous runs
     rm -rf "$PROMPT_DIR/triggers" 2>/dev/null || true
 
-    CLEANUP_NAMES=""
-    for agent in "${AGENTS[@]}"; do
-        label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
-        CLEANUP_NAMES+="\"${label}\", "
-    done
-    CLEANUP_NAMES+="\"LOGS\""
-    
-    osascript << ENDSCRIPT 2>/dev/null || true
-    tell application "iTerm"
-        set agentNames to {${CLEANUP_NAMES}}
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if name of s is in agentNames then
-                        tell s
-                            write text (ASCII character 3)
-                            write text "exit"
-                        end tell
-                    end if
-                end repeat
-            end repeat
-        end repeat
-    end tell
-ENDSCRIPT
-    sleep 2
+    # Kill any existing tmux session from a previous run
+    tmux kill-session -t dunno-agents 2>/dev/null || true
+    sleep 1
     
     # ==================== Ensure Ticket Source Labels ====================
     
@@ -2112,25 +2059,342 @@ PYLOGGER
     sed 's/^    //' > "$PROMPT_DIR/run-logs.sh" << LOGSCRIPT
     #!/bin/bash
     echo "╔══════════════════════════════════════╗"
-    echo "║       📝 TEAM LOGS (filtered)        ║"
-    echo "║  📨 agent msgs  ❌ test fails        ║"
-    echo "║  ✏️  edits  ⏳ waiting                ║"
-    echo "╠══════════════════════════════════════╣"
-    $(idx=0; for agent in "${AGENTS[@]}"; do
-        label=${SHORT_LABELS[$idx]:-$(echo "$agent" | tr '[:lower:]' '[:upper:]' | cut -c1-4)}
-        echo "echo \"║  ${label} \"";
-        ((idx++));
-    done)
+    echo "║       TEAM LOGS (live)               ║"
     echo "╚══════════════════════════════════════╝"
     echo ""
-    echo "Waiting for agent sessions to start..."
-    sleep 5
-    exec python3 '${PROMPT_DIR}/screen-logger.py'
+    LOG_DIR="${LOG_DIR}"
+    echo "Waiting for log files in: \$LOG_DIR"
+    while [ ! -d "\$LOG_DIR" ]; do sleep 1; done
+    sleep 2
+    exec tail -f "\$LOG_DIR"/*.log 2>/dev/null
 LOGSCRIPT
     chmod +x "$PROMPT_DIR/run-logs.sh"
     
     fi  # end DEBUG_MODE scripts
-    
+
+    # ==================== Status Monitor Script ====================
+
+    STATUS_AGENT_LIST=""
+    for agent in "${AGENTS[@]}"; do
+        STATUS_AGENT_LIST+="${agent} "
+    done
+    STATUS_AGENT_LIST="${STATUS_AGENT_LIST% }"
+
+    sed 's/^    //' > "$PROMPT_DIR/run-status.sh" << STATUSSCRIPT
+    #!/bin/bash
+    printf '\033]0;STATUS\007'
+    exec python3 '${PROMPT_DIR}/status-monitor.py' '${PROMPT_DIR}/triggers' ${STATUS_AGENT_LIST}
+STATUSSCRIPT
+    chmod +x "$PROMPT_DIR/run-status.sh"
+
+    cat > "$PROMPT_DIR/status-monitor.py" << 'PYMONITOR'
+#!/usr/bin/env python3
+"""dunno-workflow Status Monitor — VSCode-inspired sidebar
+Left column (this pane): agent list with status + description for every agent.
+Selecting an agent expands it in the right tmux area; sidebar stays visible.
+Keys: ↑↓ navigate, Enter/Space = focus agent, g/Esc = restore grid, q = quit
+Mouse: click agent row or ALL tab
+"""
+import curses, glob, os, subprocess, sys, time
+
+TRIGGER_DIR      = sys.argv[1]
+AGENTS           = sys.argv[2:]
+SIDEBAR_W        = 28          # this pane's fixed width (matches build_tmux_session)
+GRID_LAYOUT_FILE = os.path.join(TRIGGER_DIR, "grid.layout")
+ALL_ROW          = 2           # sidebar row of the ALL tab
+AGENT_ROW_H      = 3           # rows per agent: name row + status row + blank
+AGENTS_START_ROW = 4           # first agent's name row
+
+# Our own tmux pane ID — captured at startup while we ARE the active pane.
+MY_PANE_ID = subprocess.run(
+    ["tmux", "display-message", "-p", "#{pane_id}"],
+    capture_output=True, text=True
+).stdout.strip()
+
+ICONS = {
+    "idle": "○", "running": "●", "thinking": "◌",
+    "waitinginput": "◎", "error": "✗", "retrying": "↺",
+    "offline": "■", "pending": "◉",
+}
+STATUS_LABEL = {
+    "idle": "Idle", "running": "Running", "thinking": "Thinking",
+    "waitinginput": "Waiting", "error": "Error", "retrying": "Retry",
+    "offline": "Offline", "pending": "Pending",
+}
+
+C_RUN, C_THK, C_WRN, C_ERR, C_HDR, C_SEL, C_FOC, C_DIM2 = range(1, 9)
+
+
+def init_colors():
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(C_RUN,  curses.COLOR_GREEN,  -1)
+    curses.init_pair(C_THK,  curses.COLOR_CYAN,   -1)
+    curses.init_pair(C_WRN,  curses.COLOR_YELLOW, -1)
+    curses.init_pair(C_ERR,  curses.COLOR_RED,    -1)
+    curses.init_pair(C_HDR,  curses.COLOR_BLACK,  curses.COLOR_CYAN)
+    curses.init_pair(C_SEL,  curses.COLOR_BLACK,  curses.COLOR_WHITE)
+    curses.init_pair(C_FOC,  curses.COLOR_WHITE,  curses.COLOR_BLUE)
+    curses.init_pair(C_DIM2, curses.COLOR_WHITE,  -1)
+
+
+def status_cp(s):
+    return {
+        "running": C_RUN, "thinking": C_THK,
+        "waitinginput": C_WRN, "retrying": C_WRN, "pending": C_WRN,
+        "error": C_ERR,
+    }.get(s, 0)
+
+
+def read_state(agent):
+    f = os.path.join(TRIGGER_DIR, f"{agent}.state")
+    status, ts, preview = "idle", None, ""
+    if os.path.exists(f):
+        try:
+            parts = open(f).read().strip().split(" ", 2)
+            status = parts[0] if parts else "idle"
+            if len(parts) > 1 and parts[1].isdigit():
+                ts = int(parts[1])
+            if len(parts) > 2:
+                preview = parts[2]
+        except Exception:
+            pass
+    triggers = glob.glob(os.path.join(TRIGGER_DIR, f"{agent}.from-*.trigger"))
+    if os.path.exists(os.path.join(TRIGGER_DIR, f"{agent}.trigger")):
+        triggers.append("x")
+    if triggers and status == "idle":
+        status = "pending"
+    if ts and status not in ("idle", "offline") and time.time() - ts > 300:
+        status = "offline"
+    duration = ""
+    if ts:
+        e = int(time.time() - ts)
+        duration = f"{e // 60}m {e % 60}s"
+    return {"status": status, "duration": duration, "preview": preview}
+
+
+def put(win, y, x, text, attr=0):
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h or x < 0 or x >= w:
+        return
+    n = w - x - 1
+    if n <= 0:
+        return
+    try:
+        win.addstr(y, x, text[:n], attr)
+    except curses.error:
+        pass
+
+
+# ── tmux helpers ──────────────────────────────────────────────────────────────
+
+def tmux_pane_id(agent):
+    try:
+        return open(os.path.join(TRIGGER_DIR, f"{agent}.pane")).read().strip()
+    except Exception:
+        return None
+
+
+def tmux_focus_layout(agent):
+    """Expand agent to fill right area while keeping sidebar pinned.
+    Two-step: (1) resize agent to 9999, (2) immediately pin sidebar back.
+    Both happen in one shell invocation so the gap is sub-millisecond."""
+    pane_id = tmux_pane_id(agent)
+    if not pane_id or not MY_PANE_ID:
+        return
+    cmd = (
+        f"tmux resize-pane -t {pane_id} -y 9999"
+        f" ; tmux resize-pane -t {pane_id} -x 9999"
+        f" ; tmux resize-pane -t {MY_PANE_ID} -x {SIDEBAR_W - 1}"
+        f" ; tmux select-pane -t {pane_id}"
+    )
+    subprocess.Popen(["sh", "-c", cmd])
+
+
+def tmux_restore_grid():
+    """Restore exact grid layout from the saved layout string."""
+    try:
+        layout = open(GRID_LAYOUT_FILE).read().strip()
+        layout_cmd = f"tmux select-layout \"{layout}\""
+    except Exception:
+        layout_cmd = "tmux select-layout tiled"
+    cmd = (
+        f"{layout_cmd}"
+        f" ; tmux resize-pane -t {MY_PANE_ID} -x {SIDEBAR_W - 1}"
+        f" ; tmux select-pane -t {MY_PANE_ID}"
+    )
+    subprocess.Popen(["sh", "-c", cmd])
+
+
+# ── Sidebar drawing ───────────────────────────────────────────────────────────
+
+def draw_sidebar(win, states, sel, focused, elapsed):
+    h, w = win.getmaxyx()
+    sw = min(w, SIDEBAR_W)
+
+    # Header
+    put(win, 0, 0, " AGENTS".ljust(sw - 1), curses.color_pair(C_HDR) | curses.A_BOLD)
+    put(win, 1, 0, "─" * (sw - 1), curses.A_DIM)
+
+    # ALL tab
+    all_attr = (curses.color_pair(C_FOC) | curses.A_BOLD) if focused is None else (
+               curses.color_pair(C_SEL) if sel == 0 else curses.A_DIM)
+    put(win, ALL_ROW, 0, f" ⊞ ALL  ({len(AGENTS)} agents)".ljust(sw - 1), all_attr)
+    put(win, 3, 0, "─" * (sw - 1), curses.A_DIM)
+
+    # Agent list — always fully drawn regardless of focus state
+    # Each agent occupies AGENT_ROW_H rows:
+    #   row 0:  [icon] NAME
+    #   row 1:  STATUS  DURATION  description...
+    #   row 2:  (blank separator)
+    max_desc = sw - 3   # available chars for description on row 1
+
+    for i, agent in enumerate(AGENTS):
+        base = AGENTS_START_ROW + i * AGENT_ROW_H
+        if base + 1 >= h - 7:
+            break
+
+        st       = states.get(agent, {})
+        status   = st.get("status", "idle")
+        duration = st.get("duration", "—")
+        preview  = st.get("preview", "")
+        icon     = ICONS.get(status, "○")
+        label    = STATUS_LABEL.get(status, status.capitalize())
+        cp       = status_cp(status)
+
+        # Row 0: icon + agent name — highlighted if focused or cursor-selected
+        if focused == agent:
+            name_attr = curses.color_pair(C_FOC) | curses.A_BOLD
+        elif sel == i + 1:
+            name_attr = curses.color_pair(C_SEL) | curses.A_BOLD
+        else:
+            name_attr = curses.color_pair(cp) | curses.A_BOLD
+
+        name_line = f" {icon} {agent.upper()}"
+        put(win, base, 0, name_line.ljust(sw - 1), name_attr)
+
+        # Row 1: status label + duration + description
+        dur_str  = duration if duration else "—"
+        desc     = preview[:max(0, sw - 3 - len(label) - len(dur_str) - 3)]
+        row1     = f"   {label} {dur_str}"
+        if desc:
+            row1 += f"  {desc}"
+        put(win, base + 1, 0, row1.ljust(sw - 1),
+            curses.color_pair(cp) if cp else curses.A_DIM)
+
+        # Row 2: blank (separator)
+        put(win, base + 2, 0, " " * (sw - 1))
+
+    # ── Status summary pinned to bottom ──────────────────────────────────────
+    counts = {}
+    for st in states.values():
+        s = st.get("status", "idle")
+        counts[s] = counts.get(s, 0) + 1
+
+    run_n  = counts.get("running", 0) + counts.get("thinking", 0)
+    idle_n = counts.get("idle", 0)
+    wait_n = counts.get("pending", 0)
+    err_n  = counts.get("error", 0) + counts.get("offline", 0)
+    sm, ss = elapsed // 60, elapsed % 60
+
+    put(win, h - 6, 0, "─" * (sw - 1), curses.A_DIM)
+    put(win, h - 5, 0,
+        f" ● {run_n} running  ○ {idle_n} idle".ljust(sw - 1),
+        curses.color_pair(C_RUN) if run_n else curses.A_DIM)
+    put(win, h - 4, 0,
+        (f" ✗ {err_n} error  ◉ {wait_n} pending".ljust(sw - 1)
+         if err_n or wait_n else " " * (sw - 1)),
+        curses.color_pair(C_ERR) if err_n else curses.color_pair(C_WRN) if wait_n else curses.A_DIM)
+    put(win, h - 3, 0, "─" * (sw - 1), curses.A_DIM)
+    put(win, h - 2, 0, f" {sm}m{ss}s  ↑↓↵  g=all  q=quit".ljust(sw - 1), curses.A_DIM)
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def main(stdscr):
+    curses.curs_set(0)
+    init_colors()
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+    stdscr.timeout(2000)
+
+    focused = None
+    sel     = 0      # 0 = ALL tab, 1..N = agents[0..N-1]
+    t0      = time.time()
+
+    while True:
+        try:
+            h, w = stdscr.getmaxyx()
+            # Guard: if our pane has been crushed too narrow/short, just wait
+            if h < 8 or w < 8:
+                stdscr.getch()
+                curses.update_lines_cols()
+                continue
+
+            states  = {a: read_state(a) for a in AGENTS}
+            elapsed = int(time.time() - t0)
+
+            stdscr.erase()
+            draw_sidebar(stdscr, states, sel, focused, elapsed)
+            stdscr.refresh()
+
+        except curses.error:
+            time.sleep(0.1)
+            try:
+                curses.update_lines_cols()
+            except curses.error:
+                pass
+            continue
+
+        key = stdscr.getch()
+
+        if key == ord("q"):
+            break
+        elif key == curses.KEY_UP:
+            sel = max(0, sel - 1)
+        elif key == curses.KEY_DOWN:
+            sel = min(len(AGENTS), sel + 1)
+        elif key in (curses.KEY_ENTER, ord("\n"), ord(" ")):
+            if sel == 0:
+                focused = None
+                tmux_restore_grid()
+            elif 1 <= sel <= len(AGENTS):
+                focused = AGENTS[sel - 1]
+                tmux_focus_layout(focused)
+        elif key in (ord("g"), ord("a"), 27):
+            focused = None
+            sel = 0
+            tmux_restore_grid()
+        elif key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+                if bstate & curses.BUTTON1_CLICKED and mx < SIDEBAR_W - 1:
+                    if my == ALL_ROW:
+                        focused = None
+                        sel = 0
+                        tmux_restore_grid()
+                    elif my >= AGENTS_START_ROW:
+                        # Map click row → agent index (each agent takes AGENT_ROW_H rows)
+                        idx = (my - AGENTS_START_ROW) // AGENT_ROW_H
+                        if 0 <= idx < len(AGENTS):
+                            ag = AGENTS[idx]
+                            if focused == ag:
+                                focused = None
+                                sel = 0
+                                tmux_restore_grid()
+                            else:
+                                focused = ag
+                                sel = idx + 1
+                                tmux_focus_layout(ag)
+            except curses.error:
+                pass
+        elif key == curses.KEY_RESIZE:
+            curses.update_lines_cols()
+
+
+curses.wrapper(main)
+PYMONITOR
+    chmod +x "$PROMPT_DIR/status-monitor.py"
+
     # ==================== Launch Info ====================
     
     echo "=========================================="
@@ -2141,160 +2405,120 @@ LOGSCRIPT
     echo "=========================================="
     echo ""
     
-    # ==================== AppleScript: Dynamic Layout ====================
-    
-    NUM_WORKERS=${#WORKER_AGENTS[@]}
-    ROWS=$(( (NUM_WORKERS + 1) / 2 ))
-    
-    # Build the AppleScript dynamically
-    build_applescript() {
-        local as=""
-        as+='tell application "iTerm"\n'
-        as+='    activate\n'
-        as+='    set newWindow to (create window with default profile)\n'
-        as+='    tell newWindow\n'
+    # ==================== tmux: Dynamic Layout ====================
 
-        # Interactive agent (left, full height) — split to create worker column,
-        # then the PM pane (current session) will be launched via command at the end
-        local int_label
-        int_label=$(echo "$INTERACTIVE_AGENT" | tr '[:lower:]' '[:upper:]')
-        as+="        tell current session\n"
-        as+="            set pmSession to it\n"
-        as+="            set worker0Session to (split vertically with default profile)\n"
-        as+="        end tell\n"
+    # All agents: interactive first, then workers
+    ALL_AGENTS=("$INTERACTIVE_AGENT" "${WORKER_AGENTS[@]}")
+    NUM_ALL=${#ALL_AGENTS[@]}
 
-        # First worker
-        local w0_label
-        w0_label=$(echo "${WORKER_AGENTS[0]}" | tr '[:lower:]' '[:upper:]')
-        as+="        tell worker0Session\n"
-        as+="            set name to \"${w0_label}\"\n"
-    
-        if [ "$NUM_WORKERS" -ge 2 ]; then
-            as+="            set worker1Session to (split vertically with default profile)\n"
-        fi
-        as+="        end tell\n"
+    build_tmux_session() {
+        local session="dunno-agents"
 
-        # Second worker (right column top)
-        if [ "$NUM_WORKERS" -ge 2 ]; then
-            local w1_label
-            w1_label=$(echo "${WORKER_AGENTS[1]}" | tr '[:lower:]' '[:upper:]')
-            as+="        tell worker1Session\n"
-            as+="            set name to \"${w1_label}\"\n"
-            if [ "$DEBUG_MODE" = true ]; then
-                as+="            set logsSession to (split vertically with default profile)\n"
+        # Create session; first pane becomes the STATUS sidebar
+        tmux new-session -d -s "$session" -x 220 -y 55
+
+        # tmux options
+        tmux set-option -t "$session" mouse on
+        tmux set-option -t "$session" status off
+        tmux set-option -t "$session" pane-border-status top
+        tmux set-option -t "$session" pane-border-format " #[bold]#{pane_title}#[nobold] "
+
+        # Capture STATUS pane ID
+        local STATUS_PANE
+        STATUS_PANE=$(tmux display -p -t "${session}:0.0" '#{pane_id}')
+
+        # Split right for the first agent pane
+        tmux split-window -h -t "${STATUS_PANE}"
+        local PANE_IDS
+        PANE_IDS=()
+        PANE_IDS+=("$(tmux display -p -t "${session}:" '#{pane_id}')")
+
+        # Resize sidebar to 27 cols (SIDEBAR_W=28 minus border)
+        tmux resize-pane -t "${STATUS_PANE}" -x 27
+
+        # Build 2-column agent grid for remaining agents
+        local i=1
+        while [ $i -lt "$NUM_ALL" ]; do
+            local col=$(( i % 2 ))
+            if [ "$col" -eq 1 ]; then
+                # Right column: split right from the left-column pane in this row
+                tmux split-window -h -t "${PANE_IDS[$((i-1))]}"
+            else
+                # Left column: split down from the pane two positions back
+                tmux split-window -v -t "${PANE_IDS[$((i-2))]}"
             fi
-            as+="        end tell\n"
-
-            if [ "$DEBUG_MODE" = true ]; then
-                as+="        tell logsSession\n"
-                as+="            set name to \"LOGS\"\n"
-                as+="        end tell\n"
-            fi
-        fi
-
-        # Split first worker horizontally for 3rd worker (bottom-left of grid)
-        if [ "$NUM_WORKERS" -ge 3 ]; then
-            local w2_label
-            w2_label=$(echo "${WORKER_AGENTS[2]}" | tr '[:lower:]' '[:upper:]')
-            as+="        tell worker0Session\n"
-            as+="            set worker2Session to (split horizontally with default profile)\n"
-            as+="        end tell\n"
-            as+="        tell worker2Session\n"
-            as+="            set name to \"${w2_label}\"\n"
-            as+="        end tell\n"
-        fi
-
-        # Split second worker horizontally for 4th worker (bottom-right of grid)
-        if [ "$NUM_WORKERS" -ge 4 ]; then
-            local w3_label
-            w3_label=$(echo "${WORKER_AGENTS[3]}" | tr '[:lower:]' '[:upper:]')
-            as+="        tell worker1Session\n"
-            as+="            set worker3Session to (split horizontally with default profile)\n"
-            as+="        end tell\n"
-            as+="        tell worker3Session\n"
-            as+="            set name to \"${w3_label}\"\n"
-            as+="        end tell\n"
-        fi
-
-        # Workers 5+ — split from previous row
-        local widx=4
-        while [ $widx -lt "$NUM_WORKERS" ]; do
-            local wn_label prev_idx
-            wn_label=$(echo "${WORKER_AGENTS[$widx]}" | tr '[:lower:]' '[:upper:]')
-            prev_idx=$((widx - 2))
-            as+="        tell worker${prev_idx}Session\n"
-            as+="            set worker${widx}Session to (split horizontally with default profile)\n"
-            as+="        end tell\n"
-            as+="        tell worker${widx}Session\n"
-            as+="            set name to \"${wn_label}\"\n"
-            as+="        end tell\n"
-            ((widx++))
+            PANE_IDS+=("$(tmux display -p -t "${session}:" '#{pane_id}')")
+            ((i++))
         done
 
-        local launch_idx launch_label
-        launch_idx=0
-        while [ $launch_idx -lt "$NUM_WORKERS" ]; do
-            launch_label=$(printf '%s' "${WORKER_AGENTS[$launch_idx]}" | tr '[:lower:]' '[:upper:]')
-            as+="        tell worker${launch_idx}Session\n"
-            as+="            write text \"bash -l '${PROMPT_DIR}/run-${WORKER_AGENTS[$launch_idx]}.sh'\"\n"
-            as+="        end tell\n"
-            ((launch_idx++))
+        # Name panes and write pane IDs to trigger files for send-to-agent
+        mkdir -p "$PROMPT_DIR/triggers"
+        tmux select-pane -t "${STATUS_PANE}" -T "STATUS"
+        local ai=0
+        while [ $ai -lt "$NUM_ALL" ]; do
+            local agent="${ALL_AGENTS[$ai]}"
+            local label
+            label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
+            tmux select-pane -t "${PANE_IDS[$ai]}" -T "$label"
+            echo "${PANE_IDS[$ai]}" > "$PROMPT_DIR/triggers/${agent}.pane"
+            ((ai++))
         done
 
-        if [ "$DEBUG_MODE" = true ] && [ "$NUM_WORKERS" -ge 2 ]; then
-            as+="        tell logsSession\n"
-            as+="            write text \"bash -l '${PROMPT_DIR}/run-logs.sh'\"\n"
-            as+="        end tell\n"
-        fi
-    
-        as+="    end tell\n"
-        as+='    set bounds of newWindow to {0, 0, 9999, 9999}\n'
-        as+="end tell\n"
-    
-        printf '%b' "$as"
-    }
-    
-    osascript <<< "$(build_applescript)"
+        # Key binding: Prefix+g → back to grid (unzoom + focus sidebar)
+        tmux bind-key -T prefix g \
+            run-shell 'tmux resize-pane -Z -t dunno-agents: 2>/dev/null; tmux select-pane -t dunno-agents:0.0 2>/dev/null'
 
-    # Launch PM in its pane — create a short symlink to avoid write text issues
-    # where zsh eats the first character of long commands.
-    local pm_link="/tmp/dw-pm-$$.sh"
-    ln -sf "${PROMPT_DIR}/run-${INTERACTIVE_AGENT}.sh" "$pm_link"
-    local w0_label
-    w0_label=$(echo "${WORKER_AGENTS[0]}" | tr '[:lower:]' '[:upper:]')
-    sleep 3
-    osascript << PMSCRIPT 2>/dev/null
+        # Launch STATUS monitor in sidebar pane
+        tmux send-keys -t "${STATUS_PANE}" "bash -l '${PROMPT_DIR}/run-status.sh'" Enter
+
+        # Launch each agent in its pane
+        local li=0
+        while [ $li -lt "$NUM_ALL" ]; do
+            local agent="${ALL_AGENTS[$li]}"
+            tmux send-keys -t "${PANE_IDS[$li]}" "bash -l '${PROMPT_DIR}/run-${agent}.sh'" Enter
+            ((li++))
+        done
+
+        # Save grid layout so status-monitor can restore it after focus mode
+        sleep 0.3
+        tmux display -p -t "${session}:0" '#{window_layout}' \
+            > "$PROMPT_DIR/triggers/grid.layout" 2>/dev/null || true
+
+        # DEBUG: open LOGS in a separate tmux window, then return to main window
+        if [ "$DEBUG_MODE" = true ]; then
+            tmux new-window -t "${session}" -n "LOGS"
+            tmux send-keys -t "${session}:LOGS" "bash -l '${PROMPT_DIR}/run-logs.sh'" Enter
+            tmux select-window -t "${session}:0"
+        fi
+
+        # Open iTerm2 attached to the tmux session
+        osascript << OSAEND 2>/dev/null
 tell application "iTerm"
-    -- Target the front window (most recently created/activated by build_applescript)
-    tell front window
-        tell current tab
-            repeat with s in sessions
-                set sName to name of s
-                if sName contains "zsh" and sName does not contain "sleep" and sName does not contain "Python" then
-                    tell s
-                        write text " bash -l ${pm_link}"
-                    end tell
-                    return "launched"
-                end if
-            end repeat
-        end tell
-    end tell
+    activate
+    set newWin to (create window with default profile command "tmux attach-session -t ${session}")
+    set bounds of newWin to {0, 0, 9999, 9999}
 end tell
-PMSCRIPT
+OSAEND
+    }
+
+    build_tmux_session
 
     # ==================== Post-launch Info ====================
     
     echo ""
-    echo "Team launched! (${#AGENTS[@]} agents)"
+    echo "Team launched! (${#AGENTS[@]} agents) — tmux session: dunno-agents"
     echo ""
-    echo "  PM commands:"
-    while IFS= read -r cmd; do
-        echo "    • ${cmd}"
-    done < <(yq_get ".agents.${INTERACTIVE_AGENT}.commands // {} | keys | .[]" | head -8)
+    echo "  Navigation (tmux):"
+    echo "    • Click any pane        → focus it, type into that agent"
+    echo "    • Sidebar ↑↓ + Enter    → select agent, switch tmux focus to its pane"
+    echo "    • Sidebar z             → zoom selected agent to full screen"
+    echo "    • Prefix + z            → toggle zoom on current pane"
+    echo "    • Prefix + g            → unzoom, return to grid"
+    echo "    • Prefix + arrow        → navigate between panes"
     echo ""
-    echo "  Navigation:"
-    echo "    • Cmd+[ / Cmd+]     → Switch panes"
-    echo "    • Cmd+Shift+Enter   → Zoom a pane"
+    echo "  Sidebar keys (when sidebar pane is active):"
+    echo "    • g / Escape            → show all agents (grid view)"
+    echo "    • q                     → quit status monitor"
 }
 
 # ==================== Dispatch ====================
