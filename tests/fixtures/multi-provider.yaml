@@ -8,6 +8,12 @@ tickets:
     directory: ./tickets
     format: markdown
 
+memory:
+  enabled: true
+
+monitoring:
+  webhook_url: http://localhost:3000
+
 events:
   task:
     description: Work assignment

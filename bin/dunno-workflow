@@ -53,8 +53,62 @@ get_template_dir() {
 }
 
 cmd_init() {
+    local upgrade=false
+    [ "${1:-}" = "--upgrade" ] && upgrade=true
+
+    if [ "$upgrade" = true ]; then
+        if [ ! -f "workflow.yaml" ]; then
+            echo "No workflow.yaml found. Run 'dunno-workflow init' first."; exit 1
+        fi
+        if ! command -v yq &>/dev/null; then
+            echo "ERROR: yq is required for upgrade. brew install yq"; exit 1
+        fi
+
+        local changes=0
+
+        # Add provider field to agents that don't have it
+        local agent_names
+        agent_names=$(yq '.agents | keys | .[]' workflow.yaml)
+        for agent in $agent_names; do
+            local has_provider
+            has_provider=$(yq ".agents.$agent.provider // \"\"" workflow.yaml)
+            if [ -z "$has_provider" ]; then
+                yq -i ".agents.$agent.provider = \"claude\"" workflow.yaml
+                echo "  + Added provider: claude to agent '$agent'"
+                changes=$((changes + 1))
+            fi
+        done
+
+        # Add memory section if missing
+        local has_memory
+        has_memory=$(yq '.memory // ""' workflow.yaml)
+        if [ -z "$has_memory" ] || [ "$has_memory" = "null" ]; then
+            yq -i '.memory.enabled = true' workflow.yaml
+            echo "  + Added memory.enabled: true"
+            changes=$((changes + 1))
+        fi
+
+        # Add monitoring section if missing
+        local has_monitoring
+        has_monitoring=$(yq '.monitoring // ""' workflow.yaml)
+        if [ -z "$has_monitoring" ] || [ "$has_monitoring" = "null" ]; then
+            yq -i '.monitoring.webhook_url = "http://localhost:3000"' workflow.yaml
+            echo "  + Added monitoring.webhook_url"
+            changes=$((changes + 1))
+        fi
+
+        if [ "$changes" -eq 0 ]; then
+            echo "workflow.yaml is already up to date. No changes needed."
+        else
+            echo "Upgraded workflow.yaml ($changes change(s)). Run 'dunno-workflow validate' to verify."
+        fi
+        return 0
+    fi
+
     if [ -f "workflow.yaml" ]; then
-        echo "workflow.yaml already exists. Remove it first to start fresh."; exit 1
+        echo "workflow.yaml already exists."
+        echo "  Use 'dunno-workflow init --upgrade' to add new fields without losing your config."
+        exit 1
     fi
     local tpl; tpl="$(get_template_dir)"
     cp "$tpl/workflow.yaml" ./workflow.yaml
@@ -2917,7 +2971,7 @@ OSAEND
 
 case "${1:-}" in
     start)          shift; cmd_start "$@" ;;
-    init)           cmd_init ;;
+    init)           shift; cmd_init "$@" ;;
     validate)       cmd_validate ;;
     analyze)        shift; cmd_analyze "$@" ;;
     stop)           cmd_stop ;;
