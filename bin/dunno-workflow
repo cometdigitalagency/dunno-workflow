@@ -2677,32 +2677,32 @@ def tmux_pane_id(agent):
 
 
 def tmux_focus_layout(agent):
-    """Expand agent to fill right area while keeping sidebar pinned.
-    Two-step: (1) resize agent to 9999, (2) immediately pin sidebar back.
-    Both happen in one shell invocation so the gap is sub-millisecond."""
+    """Expand the selected agent pane vertically to fill the right column.
+    Only touches height — sidebar width stays untouched so it never disappears.
+    Other agent panes are minimized to 1 row."""
     pane_id = tmux_pane_id(agent)
-    if not pane_id or not MY_PANE_ID:
+    if not pane_id:
         return
-    cmd = (
-        f"tmux resize-pane -t {pane_id} -y 9999"
-        f" ; tmux resize-pane -t {pane_id} -x 9999"
-        f" ; tmux resize-pane -t {MY_PANE_ID} -x {SIDEBAR_W - 1}"
-        f" ; tmux select-pane -t {pane_id}"
-    )
-    subprocess.Popen(["sh", "-c", cmd])
+    parts = []
+    # Minimize all other agent panes (height only)
+    for a in AGENTS:
+        other_id = tmux_pane_id(a)
+        if other_id and other_id != pane_id:
+            parts.append(f"tmux resize-pane -t {other_id} -y 1 2>/dev/null")
+    # Expand target pane vertically
+    parts.append(f"tmux resize-pane -t {pane_id} -y 9999 2>/dev/null")
+    # Select the target pane
+    parts.append(f"tmux select-pane -t {pane_id}")
+    subprocess.Popen(["sh", "-c", " ; ".join(parts)])
 
 
 def tmux_restore_grid():
-    """Restore exact grid layout from the saved layout string."""
-    try:
-        layout = open(GRID_LAYOUT_FILE).read().strip()
-        layout_cmd = f"tmux select-layout \"{layout}\""
-    except Exception:
-        layout_cmd = "tmux select-layout tiled"
+    """Restore grid: sidebar left (main pane), agents stacked vertically right.
+    Uses main-vertical layout with main-pane-width set to sidebar width."""
     cmd = (
-        f"{layout_cmd}"
-        f" ; tmux resize-pane -t {MY_PANE_ID} -x {SIDEBAR_W - 1}"
-        f" ; tmux select-pane -t {MY_PANE_ID}"
+        f"tmux set-option -t dunno-agents main-pane-width {SIDEBAR_W - 1} 2>/dev/null ; "
+        f"tmux select-layout -t dunno-agents:0 main-vertical 2>/dev/null ; "
+        f"tmux select-pane -t {MY_PANE_ID}"
     )
     subprocess.Popen(["sh", "-c", cmd])
 
@@ -2732,13 +2732,12 @@ def draw_sidebar(win, states, sel, focused, elapsed):
 
     for i, agent in enumerate(AGENTS):
         base = AGENTS_START_ROW + i * AGENT_ROW_H
-        if base + 1 >= h - 7:
+        if base + 1 >= h - 2:
             break
 
         st       = states.get(agent, {})
         status   = st.get("status", "idle")
         duration = st.get("duration", "—")
-        preview  = st.get("preview", "")
         icon     = ICONS.get(status, "○")
         label    = STATUS_LABEL.get(status, status.capitalize())
         cp       = status_cp(status)
@@ -2754,40 +2753,19 @@ def draw_sidebar(win, states, sel, focused, elapsed):
         name_line = f" {icon} {agent.upper()}"
         put(win, base, 0, name_line.ljust(sw - 1), name_attr)
 
-        # Row 1: status label + duration + description
+        # Row 1: status + duration
         dur_str  = duration if duration else "—"
-        desc     = preview[:max(0, sw - 3 - len(label) - len(dur_str) - 3)]
         row1     = f"   {label} {dur_str}"
-        if desc:
-            row1 += f"  {desc}"
         put(win, base + 1, 0, row1.ljust(sw - 1),
             curses.color_pair(cp) if cp else curses.A_DIM)
 
         # Row 2: blank (separator)
         put(win, base + 2, 0, " " * (sw - 1))
 
-    # ── Status summary pinned to bottom ──────────────────────────────────────
-    counts = {}
-    for st in states.values():
-        s = st.get("status", "idle")
-        counts[s] = counts.get(s, 0) + 1
-
-    run_n  = counts.get("running", 0) + counts.get("thinking", 0)
-    idle_n = counts.get("idle", 0)
-    wait_n = counts.get("pending", 0)
-    err_n  = counts.get("error", 0) + counts.get("offline", 0)
+    # ── Keyboard hints pinned to bottom ──
     sm, ss = elapsed // 60, elapsed % 60
-
-    put(win, h - 6, 0, "─" * (sw - 1), curses.A_DIM)
-    put(win, h - 5, 0,
-        f" ● {run_n} running  ○ {idle_n} idle".ljust(sw - 1),
-        curses.color_pair(C_RUN) if run_n else curses.A_DIM)
-    put(win, h - 4, 0,
-        (f" ✗ {err_n} error  ◉ {wait_n} pending".ljust(sw - 1)
-         if err_n or wait_n else " " * (sw - 1)),
-        curses.color_pair(C_ERR) if err_n else curses.color_pair(C_WRN) if wait_n else curses.A_DIM)
-    put(win, h - 3, 0, "─" * (sw - 1), curses.A_DIM)
-    put(win, h - 2, 0, f" {sm}m{ss}s  ↑↓↵  g=all  q=quit".ljust(sw - 1), curses.A_DIM)
+    put(win, h - 2, 0, "─" * (sw - 1), curses.A_DIM)
+    put(win, h - 1, 0, f" {sm}m{ss}s  ↑↓↵  g=all".ljust(sw - 1), curses.A_DIM)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -2917,17 +2895,10 @@ PYMONITOR
         # Resize sidebar to 27 cols (SIDEBAR_W=28 minus border)
         tmux resize-pane -t "${STATUS_PANE}" -x 27
 
-        # Build 2-column agent grid for remaining agents
+        # Stack remaining agents vertically (split down from previous agent)
         local i=1
         while [ $i -lt "$NUM_ALL" ]; do
-            local col=$(( i % 2 ))
-            if [ "$col" -eq 1 ]; then
-                # Right column: split right from the left-column pane in this row
-                tmux split-window -h -t "${PANE_IDS[$((i-1))]}"
-            else
-                # Left column: split down from the pane two positions back
-                tmux split-window -v -t "${PANE_IDS[$((i-2))]}"
-            fi
+            tmux split-window -v -t "${PANE_IDS[$((i-1))]}"
             PANE_IDS+=("$(tmux display -p -t "${session}:" '#{pane_id}')")
             ((i++))
         done
@@ -2960,11 +2931,6 @@ PYMONITOR
             ((li++))
         done
 
-        # Save grid layout so status-monitor can restore it after focus mode
-        sleep 0.3
-        tmux display -p -t "${session}:0" '#{window_layout}' \
-            > "$PROMPT_DIR/triggers/grid.layout" 2>/dev/null || true
-
         # DEBUG: open LOGS in a separate tmux window, then return to main window
         if [ "$DEBUG_MODE" = true ]; then
             tmux new-window -t "${session}" -n "LOGS"
@@ -2980,6 +2946,13 @@ tell application "iTerm"
     set bounds of newWin to {0, 0, 9999, 9999}
 end tell
 OSAEND
+
+        # Wait for iTerm2 to attach and resize the terminal, then apply layout
+        sleep 1.5
+        tmux set-option -t "${session}" main-pane-width 27 2>/dev/null || true
+        tmux select-layout -t "${session}:0" main-vertical 2>/dev/null || true
+        # Focus the first agent pane (PM)
+        tmux select-pane -t "${PANE_IDS[0]}" 2>/dev/null || true
     }
 
     build_tmux_session
