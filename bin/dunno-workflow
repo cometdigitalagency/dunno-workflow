@@ -2023,6 +2023,31 @@ LAUNCHER
         return \$?
     }
 
+    # Track whether the architect has dispatched work and is waiting for DONE messages.
+    # For non-interactive providers (codex), the session exits after dispatch,
+    # so the loop must NOT pick up new tickets while workers are still running.
+    _WORK_DISPATCHED=false
+    _has_active_work() {
+        # Check 1: state.json has an active issue with in-progress agents
+        if [ -n "\$_STATE_FILE" ] && [ -f "\$_STATE_FILE" ] && command -v jq &>/dev/null; then
+            local _active
+            _active=\$(jq -r '.current_issue.status // empty' "\$_STATE_FILE" 2>/dev/null)
+            [ "\$_active" = "in_progress" ] && return 0
+        fi
+        # Check 2: any worker has a non-idle state (running/working)
+        for _ws in "\$TRIGGER_DIR/"*.state; do
+            [ -f "\$_ws" ] || continue
+            # Skip own state file
+            case "\$_ws" in */${agent}.state) continue ;; esac
+            local _st
+            _st=\$(awk '{print \$1}' "\$_ws" 2>/dev/null)
+            case "\$_st" in running|working|thinking) return 0 ;; esac
+        done
+        # Check 3: dispatched marker
+        [ "\$_WORK_DISPATCHED" = true ] && return 0
+        return 1
+    }
+
     while true; do
         # Check for pending trigger files (messages arrived while session was down)
         PENDING_MSG=\$(_collect_triggers)
@@ -2031,10 +2056,20 @@ LAUNCHER
             echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
             _run_agent_cli "\$PENDING_MSG"
             _CLAUDE_EXIT=\$?
+            # After processing DONE/COMPLETE messages, work may be finished
+            _WORK_DISPATCHED=false
+        elif _has_active_work; then
+            # Workers are still running — wait for their DONE triggers instead of picking up new tickets
+            echo "idle \$(date +%s) waiting for workers" > "\$TRIGGER_DIR/${agent}.state"
+            echo "--- [\$(date '+%H:%M:%S')] Workers still active. Waiting for DONE messages... ---"
+            sleep 5
+            continue
         else
             echo "running \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
             _run_agent_cli "\$INIT_PROMPT"
             _CLAUDE_EXIT=\$?
+            # After running init (which may dispatch tasks), mark work as dispatched
+            _WORK_DISPATCHED=true
         fi
         echo ""
         if [ "\$_CLAUDE_EXIT" -ne 0 ]; then
@@ -2049,12 +2084,14 @@ LAUNCHER
             '${PROMPT_DIR}/send-to-agent.sh' PM "COMPLETE: All tasks finished (auto-notify)"
             echo "--- [\$(date '+%H:%M:%S')] Auto-sent COMPLETE to PM ---"
             rm -f "\$COMPLETE_MARKER"
+            _WORK_DISPATCHED=false
         fi
         # Check for trigger files that arrived while session was active
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             echo "--- [\$(date '+%H:%M:%S')] Found pending message during post-session check (\${#PENDING_MSG} chars) ---"
             _run_agent_cli "\$PENDING_MSG"
+            _WORK_DISPATCHED=false
         fi
         sleep 5
     done

@@ -467,15 +467,39 @@ LAUNCHER
         fi
         return \$?
     }
+    _WORK_DISPATCHED=false
+    _has_active_work() {
+        if [ -n "\$_STATE_FILE" ] && [ -f "\$_STATE_FILE" ] && command -v jq &>/dev/null; then
+            local _active
+            _active=\$(jq -r '.current_issue.status // empty' "\$_STATE_FILE" 2>/dev/null)
+            [ "\$_active" = "in_progress" ] && return 0
+        fi
+        for _ws in "\$TRIGGER_DIR/"*.state; do
+            [ -f "\$_ws" ] || continue
+            case "\$_ws" in */${agent}.state) continue ;; esac
+            local _st
+            _st=\$(awk '{print \$1}' "\$_ws" 2>/dev/null)
+            case "\$_st" in running|working|thinking) return 0 ;; esac
+        done
+        [ "\$_WORK_DISPATCHED" = true ] && return 0
+        return 1
+    }
     while true; do
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             PENDING_MSG=\$(_inject_issue_context "\$PENDING_MSG")
             echo "running \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             _run_agent_cli "\$PENDING_MSG"
+            _WORK_DISPATCHED=false
+        elif _has_active_work; then
+            echo "idle \$(date +%s) waiting for workers" > "\$TRIGGER_DIR/${agent}.state"
+            echo "--- [\$(date '+%H:%M:%S')] Workers still active. Waiting for DONE messages... ---"
+            sleep 5
+            continue
         elif _has_ready_ticket; then
             echo "running \$(date +%s) initial planning" > "\$TRIGGER_DIR/${agent}.state"
             _run_agent_cli "\$INIT_PROMPT"
+            _WORK_DISPATCHED=true
         else
             echo "idle \$(date +%s) waiting" > "\$TRIGGER_DIR/${agent}.state"
             echo "No ready tickets found. Waiting for the PM to send one."
@@ -493,6 +517,7 @@ LAUNCHER
         if [ -f "\$COMPLETE_MARKER" ]; then
             '${PROMPT_DIR}/send-to-agent.sh' PM "COMPLETE: All tasks finished (auto-notify)"
             rm -f "\$COMPLETE_MARKER"
+            _WORK_DISPATCHED=false
         fi
     done
 LAUNCHER
