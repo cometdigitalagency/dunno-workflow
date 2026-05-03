@@ -2012,11 +2012,11 @@ LAUNCHER
         printf '%s' "\$_collected"
     }
 
-    # Provider-aware CLI invocation
+    # Provider-aware CLI invocation (interactive mode for auto_start)
     _run_agent_cli() {
         local _msg="\$1"
         if [ "\$_PROVIDER" = "codex" ]; then
-            printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$_msg" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+            codex -m "\$_MODEL" -s "\$_CODEX_SANDBOX" -a never --no-alt-screen "\$(printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$_msg")"
         else
             claude --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$_msg"
         fi
@@ -2024,8 +2024,6 @@ LAUNCHER
     }
 
     # Track whether the architect has dispatched work and is waiting for DONE messages.
-    # For non-interactive providers (codex), the session exits after dispatch,
-    # so the loop must NOT pick up new tickets while workers are still running.
     _WORK_DISPATCHED=false
     _has_active_work() {
         # Check 1: state.json has an active issue with in-progress agents

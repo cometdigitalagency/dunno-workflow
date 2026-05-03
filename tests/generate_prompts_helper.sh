@@ -457,11 +457,11 @@ LAUNCHER
         if [ -z "\$_ctx" ]; then printf '%s' "\$_msg"; return; fi
         printf '%s\n\n---\n%s' "\$_ctx" "\$_msg"
     }
-    # Provider-aware CLI invocation
+    # Provider-aware CLI invocation (interactive mode for auto_start)
     _run_agent_cli() {
         local _msg="\$1"
         if [ "\$_PROVIDER" = "codex" ]; then
-            printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$_msg" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+            codex -m "\$_MODEL" -s "\$_CODEX_SANDBOX" -a never --no-alt-screen "\$(printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$_msg")"
         else
             env -u ANTHROPIC_API_KEY claude --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$_msg"
         fi
