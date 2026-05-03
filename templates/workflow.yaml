@@ -33,6 +33,20 @@ tickets:
   #   directory: ./tickets
   #   format: markdown
 
+# ── Shared Memory (optional) ──
+# When enabled, dunno-workflow creates a shared context directory (.workflow/) with
+# a single state.json file. Stable team rules live in AGENTS.md; per-issue context
+# and decisions are tracked in state.json (no per-issue .md files).
+# Commit both to git for cross-session persistence.
+memory:
+  enabled: true
+
+# ── Monitoring (optional) ──
+# If set, dunno-workflow will POST agent status updates to the webhook service.
+# Start the webhook first: cd webhook && npm run start:dev
+monitoring:
+  webhook_url: http://localhost:3000
+
 # ── Events (message types between agents) ──
 events:
   task:
@@ -64,6 +78,7 @@ agents:
       The user's main interface. Takes ideas and creates tickets
       for the team. Does NOT write code.
     interactive: true
+    provider: claude            # claude (default) | codex
     model: sonnet
     tools: [read, bash, glob, grep, task_list, send_message]
     owns: { paths: [], never_edit: ["**/*"] }
@@ -114,6 +129,7 @@ agents:
       monitors completion. Does NOT write code.
     interactive: false
     auto_start: true
+    provider: claude            # claude (default) | codex
     model: sonnet
     tools: [read, bash, glob, grep, task_create, task_update, task_list, send_message]
     owns: { paths: [], never_edit: ["**/*"] }
@@ -125,19 +141,24 @@ agents:
       - "Read the ticket and understand the requirements"
       - "Mark the ticket as in-progress"
       - "Read relevant code to understand the codebase"
+      - "Identify required local dependencies: databases, queues, caches, migrations, seed data, and third-party services"
       - "Create a detailed plan. Only dispatch to agents that have actual work."
+      - "If runtime prerequisites are unclear, inspect the repo first and only ask PM/user for the missing high-impact decision"
       - "PHASE 1 — DISPATCH to BACKEND and FRONTEND only. Do NOT dispatch QA yet."
       - "Comment on the ticket: 'Planning complete. Tasks dispatched to: <agents>.'"
       - "WAIT for DONE-backend and DONE-frontend messages"
       - "PHASE 2 — Once backend and frontend are DONE, NOW dispatch QA"
       - "WAIT for DONE-qa message"
-      - "When all agents report done: mark ticket as done, notify PM via COMPLETE message"
+      - "When all agents report done and runtime verification is satisfied: mark ticket as done, notify PM via COMPLETE message"
       - "Return to waiting for the next ticket"
     rules:
       - "NEVER rely on TaskCreate alone — agents cannot see it, you MUST use send-to-agent.sh"
       - "Always dispatch via send-to-agent.sh using the Bash tool"
       - "NEVER dispatch QA at the same time as backend/frontend"
       - "After dispatching, wait silently for DONE messages — do NOT poll or sleep"
+      - "Discover setup from the repo before asking the user"
+      - "Only ask PM/user when a runtime dependency decision cannot be inferred safely"
+      - "Do NOT send COMPLETE until required services, env vars, setup steps, and verification commands are documented"
     init:
       default: >
         Check for ready tickets using the TICKET COMMANDS in your system prompt.
@@ -155,10 +176,22 @@ agents:
       After dispatching, just WAIT. Do NOT run sleep, loops, or grep commands.
       The agents will message you directly via send-to-agent.sh when done.
 
+      ## CLARIFICATION POLICY
+      Detect runtime needs yourself first by reading the repo, configs, env files, scripts, docs,
+      and existing infrastructure setup. Ask PM/user only for decisions you cannot safely infer,
+      such as whether to use local Docker services, an existing cloud database, or a shared Redis/MQ.
+      When you ask, make the question concrete and specific.
+
+      ## COMPLETION BAR
+      COMPLETE means more than code written. Before you notify PM, confirm the team has
+      documented required services, env vars, migrations/setup steps, and the command used
+      to verify the project starts or otherwise runs correctly for the delivered change.
+
   backend:
     role: Backend Developer
     description: Implements backend services, APIs, and modules.
     interactive: false
+    provider: claude            # claude (default) | codex
     model: sonnet
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
@@ -170,6 +203,7 @@ agents:
     workflow:
       - "Wait for a TASK: message from the architect"
       - "Execute the task completely"
+      - "Document required services, env vars, migrations, and startup steps introduced by your changes"
       - "Commit your changes"
       - "Notify the architect: DONE-backend with a brief summary"
       - "Wait for the next message"
@@ -177,6 +211,7 @@ agents:
       - "Follow existing code patterns"
       - "Read files before editing them"
       - "Work on ONE issue at a time"
+      - "If runtime dependencies are missing or unverifiable, report BLOCKED with the exact prerequisite instead of DONE-backend"
     init:
       default: >
         You are event-driven. Wait for TASK: messages from the architect.
@@ -189,6 +224,7 @@ agents:
     role: Frontend Developer
     description: Implements UI components and pages.
     interactive: false
+    provider: claude            # claude (default) | codex
     model: sonnet
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
@@ -200,6 +236,7 @@ agents:
     workflow:
       - "Wait for a TASK: message from the architect"
       - "Execute the task completely"
+      - "Document any required env vars, services, or run steps introduced by your changes"
       - "Commit your changes"
       - "Notify the architect: DONE-frontend with a brief summary"
       - "Wait for the next message"
@@ -207,6 +244,7 @@ agents:
       - "Follow existing component patterns"
       - "Read files before editing them"
       - "Work on ONE issue at a time"
+      - "If runtime dependencies are missing or unverifiable, report BLOCKED with the exact prerequisite instead of DONE-frontend"
     init:
       default: >
         You are event-driven. Wait for TASK: messages from the architect.
@@ -221,6 +259,7 @@ agents:
       Writes tests and verifies quality. The architect will only send
       tasks AFTER implementation is done.
     interactive: false
+    provider: claude            # claude (default) | codex
     model: sonnet
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
@@ -234,6 +273,7 @@ agents:
       - "Read the implementation code"
       - "Write comprehensive tests"
       - "Run the tests"
+      - "Run the project's startup or verification commands when feasible, and confirm required services/env docs exist"
       - "If tests pass: notify architect with DONE-qa"
       - "If tests fail: send BUG to the responsible agent, do NOT send DONE-qa"
       - "Wait for the next message"
@@ -241,6 +281,7 @@ agents:
       - "Always run tests after writing them"
       - "Report bugs with detailed reproduction steps"
       - "NEVER poll, sleep, or run loops — just wait for messages"
+      - "If the app cannot start because setup is missing or undocumented, send BUG instead of DONE-qa"
     init:
       default: >
         You are event-driven. Wait for TASK: messages from the architect.

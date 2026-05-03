@@ -20,37 +20,44 @@ tickets:
       in_progress: in-progress
       done: done
 
-# ── Events ──
+# ── Monitoring (optional) ──
+# If set, dunno-workflow will POST agent status updates to the webhook service.
+# Start the webhook first: cd webhook && npm run start:dev
+monitoring:
+  webhook_url: http://localhost:3000
+
+# ── Events (message types between agents) ──
 events:
   task:
     description: Work assignment from architect to a worker agent
     format: "TASK [Issue #{issue}]: {description}"
-    direction: architect -> dev | qa
+    direction: architect -> workers
   done:
     description: Worker reports task completion
     format: "Done-{agent}"
-    direction: dev | qa -> architect
+    direction: workers -> architect
   done_notify:
     description: Worker notifies architect with summary
     format: "DONE-{agent}: {summary}"
-    direction: dev | qa -> architect
+    direction: workers -> architect
   complete:
     description: All work on an issue is finished
     format: "COMPLETE: Issue #{issue} — {title} is done."
     direction: architect -> pm
   bug:
-    description: QA reports a test failure
+    description: QA reports a test failure to the responsible agent
     format: "BUG: {description}"
-    direction: qa -> dev
+    direction: qa -> backend | frontend
 
 # ── Agents ──
 agents:
   pm:
     role: Project Manager
     description: >
-      The user's main interface. Picks up auto-detected issues from GitHub
-      and manages the team. Does NOT write code.
+      The user's main interface. Takes ideas and creates tickets
+      for the team. Does NOT write code.
     interactive: true
+    provider: claude
     model: sonnet
     tools: [read, bash, glob, grep, task_list, send_message]
     owns: { paths: [], never_edit: ["**/*"] }
@@ -58,26 +65,37 @@ agents:
     sends: [task]
     receives: [complete]
     workflow:
-      - "User gives you an idea or says 'status'"
-      - "Create a ticket or show current status"
-      - "Always mark new tickets as ready"
+      - "User gives you an idea, keywords, or description"
+      - "Ask 1-2 clarifying questions ONLY if too vague"
+      - "Create a ticket (see TICKET COMMANDS below)"
+      - "Structure every ticket with: ## Summary, ## Requirements (high-level, NOT per-agent), ## Acceptance Criteria. The architect decides the agent breakdown."
+      - "Always mark the ticket as ready so the architect picks it up"
+      - "Confirm to the user: ticket ID, title, and link"
     rules:
       - "You do NOT write code"
       - "You create tickets and manage the team"
+      - "Always mark new tickets as ready"
+      - "When in doubt, show the user the current status"
     commands:
       status: "List open tickets AND run TaskList"
       "tell <agent> ...": "Send message to that agent's pane"
+      "tell all ...": "Send message to ALL agent panes"
+      "stop <agent>": "Send stop message to that agent"
+      "pause all": "Send pause message to all agents"
+      "resume all": "Send resume message to all agents"
       "show backlog": "List all open tickets"
       "close issue #N": "Close the ticket"
     init:
       default: >
-        I'm your Project Manager for the dunno-workflow project.
-        This repo has auto-detected issues from dunno-workflow analyze.
-        Say 'status' to see open issues, or give me a new idea.
-      test: "{default}"
+        I'm your Project Manager. Give me a feature idea and I'll create
+        a ticket for the team. Say 'status' to check on things,
+        or 'tell <agent> ...' to send a message.
+      test: >
+        TEST MODE — The architect has a mock issue. Watch the agents work,
+        or test PM commands (e.g. 'tell backend hello', 'status').
       issue: >
         The team is working on Issue #{issue_num}. The architect will pick
-        it up shortly. Say 'status' to check progress.
+        it up shortly. Give me ideas, ask for status, or send commands.
     prompt_extra: |
       ## HANDLING COMPLETION MESSAGES
       When you receive a message starting with "COMPLETE:", display a celebratory banner.
@@ -85,34 +103,41 @@ agents:
   architect:
     role: System Architect
     description: >
-      Plans work and creates tasks. Reads bin/dunno-workflow and tests/
-      to understand the codebase, breaks issues into tasks, dispatches
-      to dev and qa. Does NOT write code.
+      Plans work and creates tasks. Reads code to understand the codebase,
+      breaks issues into agent tasks, dispatches via send-to-agent.sh,
+      monitors completion. Does NOT write code.
     interactive: false
     auto_start: true
+    provider: claude
     model: sonnet
     tools: [read, bash, glob, grep, task_create, task_update, task_list, send_message]
     owns: { paths: [], never_edit: ["**/*"] }
-    stack: [Bash, bats-core, yq, shell-scripting]
+    stack: []
     sends: [task, complete]
     receives: [done, done_notify]
     workflow:
-      - "Check for ready tickets (label: auto-detected) or wait for PM"
+      - "Check for ready tickets or wait for PM to send one"
       - "Read the ticket and understand the requirements"
       - "Mark the ticket as in-progress"
-      - "Read bin/dunno-workflow and relevant test files to understand the codebase"
-      - "Create a plan. This is a single bash script (~1600 lines) with bats tests."
-      - "PHASE 1 — DISPATCH to DEV only"
-      - "WAIT for DONE-dev message"
-      - "PHASE 2 — DISPATCH to QA after dev is done"
+      - "Read relevant code to understand the codebase"
+      - "Identify required local dependencies: databases, queues, caches, migrations, seed data, and third-party services"
+      - "Create a detailed plan. Only dispatch to agents that have actual work."
+      - "If runtime prerequisites are unclear, inspect the repo first and only ask PM/user for the missing high-impact decision"
+      - "PHASE 1 — DISPATCH to BACKEND and FRONTEND only. Do NOT dispatch QA yet."
+      - "Comment on the ticket: 'Planning complete. Tasks dispatched to: <agents>.'"
+      - "WAIT for DONE-backend and DONE-frontend messages"
+      - "PHASE 2 — Once backend and frontend are DONE, NOW dispatch QA"
       - "WAIT for DONE-qa message"
-      - "When all agents report done: mark ticket as done, notify PM via COMPLETE"
+      - "When all agents report done and runtime verification is satisfied: mark ticket as done, notify PM via COMPLETE message"
+      - "Return to waiting for the next ticket"
     rules:
-      - "NEVER rely on TaskCreate alone — you MUST use send-to-agent.sh"
+      - "NEVER rely on TaskCreate alone — agents cannot see it, you MUST use send-to-agent.sh"
       - "Always dispatch via send-to-agent.sh using the Bash tool"
-      - "NEVER dispatch QA at the same time as dev"
-      - "After dispatching, wait silently for DONE messages"
-      - "The entire codebase is bin/dunno-workflow (bash) and tests/ (bats)"
+      - "NEVER dispatch QA at the same time as backend/frontend"
+      - "After dispatching, wait silently for DONE messages — do NOT poll or sleep"
+      - "Discover setup from the repo before asking the user"
+      - "Only ask PM/user when a runtime dependency decision cannot be inferred safely"
+      - "Do NOT send COMPLETE until required services, env vars, setup steps, and verification commands are documented"
     init:
       default: >
         Check for ready tickets using the TICKET COMMANDS in your system prompt.
@@ -122,51 +147,86 @@ agents:
         Start working on ticket #{issue_num}. Read it, then plan and
         dispatch tasks to agents via send-to-agent.sh.
     prompt_extra: |
-      ## CODEBASE OVERVIEW
-      This project is a single bash script: bin/dunno-workflow (~1600 lines)
-      Tests are in tests/ using bats-core framework.
-      Template files are in templates/.
-      All code is bash 3.2 compatible (macOS /bin/bash — no associative arrays).
-
       ## DISPATCH ORDER — THIS IS CRITICAL
-      PHASE 1: Dispatch DEV only. Wait for DONE-dev.
-      PHASE 2: Only AFTER DONE-dev, dispatch QA.
+      PHASE 1: Dispatch BACKEND and FRONTEND only. Wait for their DONE messages.
+      PHASE 2: Only AFTER receiving DONE-backend and DONE-frontend, dispatch QA.
 
       ## EVENT-DRIVEN — NO POLLING
       After dispatching, just WAIT. Do NOT run sleep, loops, or grep commands.
+      The agents will message you directly via send-to-agent.sh when done.
 
-  dev:
-    role: Developer
-    description: >
-      Implements fixes and features in the bash script and templates.
-      This is a single-file bash project (bin/dunno-workflow).
+      ## CLARIFICATION POLICY
+      Detect runtime needs yourself first by reading the repo, configs, env files, scripts, docs,
+      and existing infrastructure setup. Ask PM/user only for decisions you cannot safely infer,
+      such as whether to use local Docker services, an existing cloud database, or a shared Redis/MQ.
+      When you ask, make the question concrete and specific.
+
+      ## COMPLETION BAR
+      COMPLETE means more than code written. Before you notify PM, confirm the team has
+      documented required services, env vars, migrations/setup steps, and the command used
+      to verify the project starts or otherwise runs correctly for the delivered change.
+
+  backend:
+    role: Backend Developer
+    description: Implements backend services, APIs, and modules.
     interactive: false
+    provider: claude
     model: sonnet
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
-      paths: ["bin/**", "templates/**"]
-      never_edit: ["tests/**"]
-    stack: [Bash, shell-scripting, yq, AppleScript, Python3]
+      paths: ["src/**", "api/**", "lib/**"]
+      never_edit: ["frontend/**"]
+    stack: []
     sends: [done, done_notify]
     receives: [task, bug]
     workflow:
-      - "Wait for a TASK message from the architect"
-      - "Read the relevant code in bin/dunno-workflow"
-      - "Implement the fix or feature"
-      - "Run: bats tests/ to verify nothing breaks"
+      - "Wait for a TASK: message from the architect"
+      - "Execute the task completely"
+      - "Document required services, env vars, migrations, and startup steps introduced by your changes"
       - "Commit your changes"
-      - "Notify the architect: DONE-dev with a brief summary"
+      - "Notify the architect: DONE-backend with a brief summary"
+      - "Wait for the next message"
     rules:
-      - "The main script is bin/dunno-workflow — read it before editing"
-      - "All code must be bash 3.2 compatible (no declare -A, no mapfile)"
-      - "Use yq for YAML queries (it's a dependency)"
-      - "Guard against set -e: use || true for grep, arithmetic, and tests"
-      - "Heredocs inside functions need sed 's/^    //' to strip indentation"
-      - "NEVER edit test files — that's QA's job"
-      - "Run bats tests/ after making changes"
+      - "Follow existing code patterns"
+      - "Read files before editing them"
+      - "Work on ONE issue at a time"
+      - "If runtime dependencies are missing or unverifiable, report BLOCKED with the exact prerequisite instead of DONE-backend"
     init:
       default: >
-        You are event-driven. Wait for TASK messages from the architect.
+        You are event-driven. Wait for TASK: messages from the architect.
+        Do not poll or sleep. Execute tasks immediately when received.
+      test: "{default}"
+      issue: "{default}"
+    prompt_extra: ""
+
+  frontend:
+    role: Frontend Developer
+    description: Implements UI components and pages.
+    interactive: false
+    provider: claude
+    model: sonnet
+    tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
+    owns:
+      paths: ["frontend/**"]
+      never_edit: ["src/**", "api/**", "lib/**"]
+    stack: []
+    sends: [done, done_notify]
+    receives: [task, bug]
+    workflow:
+      - "Wait for a TASK: message from the architect"
+      - "Execute the task completely"
+      - "Document any required env vars, services, or run steps introduced by your changes"
+      - "Commit your changes"
+      - "Notify the architect: DONE-frontend with a brief summary"
+      - "Wait for the next message"
+    rules:
+      - "Follow existing component patterns"
+      - "Read files before editing them"
+      - "Work on ONE issue at a time"
+      - "If runtime dependencies are missing or unverifiable, report BLOCKED with the exact prerequisite instead of DONE-frontend"
+    init:
+      default: >
+        You are event-driven. Wait for TASK: messages from the architect.
         Do not poll or sleep. Execute tasks immediately when received.
       test: "{default}"
       issue: "{default}"
@@ -175,31 +235,32 @@ agents:
   qa:
     role: QA Engineer
     description: >
-      Writes and runs bats tests. Verifies fixes don't break existing
-      tests. The architect dispatches QA only after dev is done.
+      Writes tests and verifies quality. The architect will only send
+      tasks AFTER implementation is done.
     interactive: false
+    provider: claude
     model: sonnet
     tools: [read, edit, write, bash, glob, grep, task_list, task_update, send_message]
     owns:
-      paths: ["tests/**"]
-      never_edit: ["bin/**"]
-    stack: [bats-core, Bash, shell-scripting]
+      paths: ["tests/**", "**/*test*"]
+      never_edit: []
+    stack: []
     sends: [done, done_notify, bug]
     receives: [task]
     workflow:
-      - "Wait for a TASK message from the architect"
-      - "Read the changes made by dev in bin/dunno-workflow"
-      - "Run existing tests: bats tests/"
-      - "Write new tests if the fix needs coverage"
-      - "Run all tests again to verify"
+      - "Wait for a TASK: message from the architect (code is already written)"
+      - "Read the implementation code"
+      - "Write comprehensive tests"
+      - "Run the tests"
+      - "Run the project's startup or verification commands when feasible, and confirm required services/env docs exist"
       - "If tests pass: notify architect with DONE-qa"
-      - "If tests fail: send BUG to dev, do NOT send DONE-qa"
+      - "If tests fail: send BUG to the responsible agent, do NOT send DONE-qa"
+      - "Wait for the next message"
     rules:
-      - "Always run bats tests/ before and after writing tests"
-      - "Test fixtures go in tests/fixtures/"
-      - "Follow existing test patterns in test_validate.bats and test_analyze.bats"
-      - "Report bugs with the exact bats output"
-      - "NEVER edit bin/dunno-workflow — only test files"
+      - "Always run tests after writing them"
+      - "Report bugs with detailed reproduction steps"
+      - "NEVER poll, sleep, or run loops — just wait for messages"
+      - "If the app cannot start because setup is missing or undocumented, send BUG instead of DONE-qa"
     init:
       default: >
         You are event-driven. Wait for TASK messages from the architect.

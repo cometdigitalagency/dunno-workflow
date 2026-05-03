@@ -357,6 +357,22 @@ cmd_validate() {
         _v_render_event_flow
     fi
 
+    # Phase 4: Provider/model checks
+    local _v_agent_names
+    _v_agent_names=$(yq '.agents | keys | .[]' workflow.yaml)
+    for _v_a in $_v_agent_names; do
+        local _v_prov _v_mod
+        _v_prov=$(yq ".agents.$_v_a.provider // \"claude\"" workflow.yaml)
+        _v_mod=$(yq ".agents.$_v_a.model // \"\"" workflow.yaml)
+        case "$_v_prov" in
+            claude|codex) ;;
+            *) echo "ERROR: agent '$_v_a' has invalid provider '$_v_prov' (must be claude or codex)"; ((errors++)) ;;
+        esac
+        if [ "$_v_prov" = "codex" ] && [ -z "$_v_mod" ]; then
+            echo "ERROR: agent '$_v_a' uses provider 'codex' but has no model set"; ((errors++))
+        fi
+    done
+
     # Phase 4: Summary
     if [ "$errors" -eq 0 ]; then
         echo "workflow.yaml is valid"
@@ -790,31 +806,34 @@ cmd_context() {
                 line_count=$(wc -l < "./${agents_doc}" | tr -d ' ')
                 echo "  ${agents_doc} (${line_count} lines)"
             fi
-            if [ -d "${context_dir}/summaries" ]; then
-                local summary_count
-                summary_count=$(ls "${context_dir}/summaries/"*.md 2>/dev/null | wc -l | tr -d ' ')
-                echo "  summaries/: ${summary_count} file(s)"
-                ls "${context_dir}/summaries/"*.md 2>/dev/null | sort -r | head -5 | while read -r f; do
-                    echo "    $(basename "$f")"
-                done
-            fi
-            if [ -d "${context_dir}/decisions" ]; then
-                local decision_count
-                decision_count=$(ls "${context_dir}/decisions/"*.md 2>/dev/null | wc -l | tr -d ' ')
-                echo "  decisions/: ${decision_count} file(s)"
-                ls "${context_dir}/decisions/"*.md 2>/dev/null | sort -r | head -3 | while read -r f; do
-                    echo "    $(basename "$f")"
-                done
+            local state_file="${context_dir}/state.json"
+            if [ -f "$state_file" ]; then
+                echo "  state.json:"
+                if command -v jq &>/dev/null; then
+                    local current
+                    current=$(jq -r '.current_issue // empty | "    Active: Issue #\(.id) — \(.title) [\(.status)]"' "$state_file" 2>/dev/null)
+                    if [ -n "$current" ]; then
+                        echo "$current"
+                    else
+                        echo "    No active issue"
+                    fi
+                    local hist_count
+                    hist_count=$(jq '.history | length' "$state_file" 2>/dev/null)
+                    echo "    History: ${hist_count} completed issue(s)"
+                else
+                    echo "    (install jq to view state details)"
+                fi
+            else
+                echo "  No state.json yet (run 'dunno-workflow start' to initialize)"
             fi
             echo ""
             ;;
         clear)
-            echo "  This will delete all summaries and decisions (${agents_doc} is kept)."
+            echo "  This will reset the shared state (${agents_doc} is kept)."
             printf "  Are you sure? [y/N] "
             read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                rm -rf "${context_dir}/summaries" "${context_dir}/decisions"
-                mkdir -p "${context_dir}/summaries" "${context_dir}/decisions"
+                printf '{"version":1,"updated_at":"","current_issue":null,"history":[]}\n' > "${context_dir}/state.json"
                 echo "  Cleared."
             else
                 echo "  Cancelled."
@@ -921,6 +940,7 @@ cmd_start() {
     # Shared memory defaults (overridden by init_context_dir if memory.enabled: true)
     MEMORY_ENABLED="false"
     CONTEXT_DIR=""
+    STATE_FILE=""
     MEMORY_AGENTS_DOC="AGENTS.md"
 
     # ==================== Shared Context Init ====================
@@ -934,13 +954,17 @@ cmd_start() {
         CONTEXT_DIR="${REPO_DIR}/${mem_dir}"
         MEMORY_AGENTS_DOC=$(yq_get '.memory.agents_doc // "AGENTS.md"')
 
-        mkdir -p "${CONTEXT_DIR}/summaries"
-        mkdir -p "${CONTEXT_DIR}/decisions"
+        mkdir -p "${CONTEXT_DIR}"
+        STATE_FILE="${CONTEXT_DIR}/state.json"
+        if [ ! -f "$STATE_FILE" ]; then
+            printf '{"version":1,"updated_at":"","current_issue":null,"history":[]}\n' > "$STATE_FILE"
+            echo "  Created state.json"
+        fi
 
         # Bootstrap AGENTS.md only on first run
         local agents_doc_path="${REPO_DIR}/${MEMORY_AGENTS_DOC}"
         if [ ! -f "$agents_doc_path" ]; then
-            printf '%b' "# ${PROJECT_NAME} — Agent Team Context\n\nThis file is maintained by the agent team and read at the start of each session.\nEdit freely between sessions to keep conventions current.\n\n## Architecture\n\n_Fill in: key services, data flows, external dependencies._\n\n## Conventions\n\n_Fill in: naming patterns, code style, test strategy, deploy steps._\n\n## Open Questions\n\n_Fill in: unresolved issues the team needs to address._\n\n## Decisions\n\nSee \`.workflow/decisions/\` for individual architectural decision records.\n" > "$agents_doc_path"
+            printf '%b' "# ${PROJECT_NAME} — Agent Team Context\n\nThis file is maintained by the agent team and read at the start of each session.\nEdit freely between sessions to keep conventions current.\n\n## Architecture\n\n_Fill in: key services, data flows, external dependencies._\n\n## Conventions\n\n_Fill in: naming patterns, code style, test strategy, deploy steps._\n\n## Open Questions\n\n_Fill in: unresolved issues the team needs to address._\n\n## Decisions\n\nKey decisions are tracked in \`.workflow/state.json\` per issue.\n" > "$agents_doc_path"
             echo "  Created ${MEMORY_AGENTS_DOC}"
         fi
         echo "  Shared context: ${CONTEXT_DIR}/"
@@ -1176,26 +1200,87 @@ cmd_start() {
 HELPER
     chmod +x "$PROMPT_DIR/send-to-agent.sh"
 
-    # ==================== Generate Save-Context Helper ====================
+    # ==================== Generate Shared State Helper ====================
 
     if [ "$MEMORY_ENABLED" = "true" ]; then
-        cat > "$PROMPT_DIR/save-summary.sh" << HELPER
+        cat > "$PROMPT_DIR/update-state.sh" << 'STATEHELPER'
 #!/bin/bash
-# save-summary.sh — append a note to a per-issue summary file
-# Usage: save-summary.sh <issue-id> "Note text"
-#   e.g. save-summary.sh issue-42 "Backend finished auth endpoint"
-CONTEXT_DIR='${CONTEXT_DIR}'
-ISSUE="\$1"
-NOTE="\$2"
-if [ -z "\$ISSUE" ] || [ -z "\$NOTE" ]; then
-    echo "Usage: \$(basename "\$0") <issue-id> <note>" >&2
+# update-state.sh — update the shared state file
+# Usage:
+#   update-state.sh <state-file> set-issue <id> <title> <context>
+#   update-state.sh <state-file> update-agent <agent> <status> [summary]
+#   update-state.sh <state-file> add-decision <text>
+#   update-state.sh <state-file> complete-issue <summary>
+#   update-state.sh <state-file> read-context
+
+STATE_FILE="$1"
+shift
+ACTION="$1"
+shift
+
+if [ -z "$STATE_FILE" ] || [ -z "$ACTION" ]; then
+    echo "Usage: $(basename "$0") <state-file> <action> [args...]" >&2
     exit 1
 fi
-FILE="\${CONTEXT_DIR}/summaries/\${ISSUE}.md"
-printf '\n## [%s] %s\n' "\$(date '+%Y-%m-%d %H:%M')" "\$NOTE" >> "\$FILE"
-echo "Saved to \$FILE"
-HELPER
-        chmod +x "$PROMPT_DIR/save-summary.sh"
+
+if ! command -v jq &>/dev/null; then
+    echo "ERROR: jq is required for shared state. brew install jq" >&2
+    exit 1
+fi
+
+case "$ACTION" in
+    set-issue)
+        ID="$1"; TITLE="$2"; CONTEXT="$3"
+        jq --arg id "$ID" --arg title "$TITLE" --arg ctx "$CONTEXT" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.current_issue = {id: ($id|tonumber), title: $title, status: "in_progress", context: $ctx, decisions: [], agent_progress: {}} | .updated_at = $ts' \
+            "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+        ;;
+    update-agent)
+        AGENT="$1"; STATUS="$2"; SUMMARY="${3:-}"
+        jq --arg agent "$AGENT" --arg status "$STATUS" --arg summary "$SUMMARY" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.current_issue.agent_progress[$agent] = {status: $status, summary: $summary} | .updated_at = $ts' \
+            "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+        ;;
+    add-decision)
+        TEXT="$1"
+        jq --arg text "$TEXT" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.current_issue.decisions += [$text] | .updated_at = $ts' \
+            "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+        ;;
+    complete-issue)
+        SUMMARY="$1"
+        jq --arg summary "$SUMMARY" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.history = ([{id: .current_issue.id, title: .current_issue.title, resolved_at: $ts, summary: $summary}] + .history) | .history = .history[:5] | .current_issue = null | .updated_at = $ts' \
+            "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+        ;;
+    read-context)
+        jq -r '
+            if .current_issue then
+                "--- CONTEXT PACKET ---",
+                "Issue: #\(.current_issue.id) — \(.current_issue.title)",
+                "Status: \(.current_issue.status)",
+                "Context: \(.current_issue.context)",
+                (if (.current_issue.decisions | length) > 0 then
+                    "Decisions:", (.current_issue.decisions[] | "- \(.)")
+                else empty end),
+                (if (.current_issue.agent_progress | length) > 0 then
+                    "Agent Progress:",
+                    (.current_issue.agent_progress | to_entries[] | "- \(.key): \(.value.status)\(if .value.summary != "" then " — \(.value.summary)" else "" end)")
+                else empty end),
+                "--- END CONTEXT ---"
+            else
+                "(no active issue)"
+            end
+        ' "$STATE_FILE"
+        ;;
+    *)
+        echo "Unknown action: $ACTION" >&2
+        echo "Actions: set-issue, update-agent, add-decision, complete-issue, read-context" >&2
+        exit 1
+        ;;
+esac
+STATEHELPER
+        chmod +x "$PROMPT_DIR/update-state.sh"
     fi
 
     # ==================== Generate Claude Hooks ====================
@@ -1442,26 +1527,40 @@ PYEOF
             prompt+="  cat '${agents_doc_path}'\n\n"
 
             if [ "$agent_auto_start" = "true" ]; then
-                prompt+="### Issue Summaries (you maintain these)\n"
-                prompt+="Before dispatching a TASK to any worker, write or update the issue summary.\n"
-                prompt+="Replace {N} with the actual issue number:\n"
-                prompt+="  cat > '${CONTEXT_DIR}/summaries/issue-{N}.md' << 'EOF'\n"
-                prompt+="  # Issue {N}: <title>\n"
-                prompt+="  ## Context\n"
-                prompt+="  <what this issue is about>\n"
-                prompt+="  ## Decisions\n"
-                prompt+="  <key decisions made>\n"
-                prompt+="  ## Progress\n"
-                prompt+="  <what has been done, what remains>\n"
-                prompt+="  EOF\n\n"
-                prompt+="After all workers report DONE, update the summary with the final outcome.\n"
-                prompt+="You can also use the helper: bash '${PROMPT_DIR}/save-summary.sh' issue-{N} 'summary note'\n\n"
+                prompt+="### Shared State (you maintain this)\n"
+                prompt+="The team shares a single state file: ${STATE_FILE}\n\n"
+                prompt+="Before dispatching tasks, register the issue:\n"
+                prompt+="  bash '${PROMPT_DIR}/update-state.sh' '${STATE_FILE}' set-issue <ID> '<title>' '<context>'\n\n"
+                prompt+="Record decisions:\n"
+                prompt+="  bash '${PROMPT_DIR}/update-state.sh' '${STATE_FILE}' add-decision '<decision text>'\n\n"
+                prompt+="After an agent completes:\n"
+                prompt+="  bash '${PROMPT_DIR}/update-state.sh' '${STATE_FILE}' update-agent <agent> done '<summary>'\n\n"
+                prompt+="After ALL agents complete:\n"
+                prompt+="  bash '${PROMPT_DIR}/update-state.sh' '${STATE_FILE}' complete-issue '<final summary>'\n\n"
+                prompt+="### Context Packets — CRITICAL\n"
+                prompt+="When dispatching a TASK via send-to-agent.sh, include a CONTEXT PACKET in the message.\n"
+                prompt+="Generate one with:\n"
+                prompt+="  bash '${PROMPT_DIR}/update-state.sh' '${STATE_FILE}' read-context\n\n"
+                prompt+="Copy the output and include it in your TASK message so the worker has full context.\n"
+                prompt+="Format your TASK messages like this:\n\n"
+                prompt+="  TASK [Issue #N]: <brief description>\n\n"
+                prompt+="  --- CONTEXT PACKET ---\n"
+                prompt+="  Issue: #N — <title>\n"
+                prompt+="  Context: <what this issue is about>\n"
+                prompt+="  Decisions:\n"
+                prompt+="  - <decision 1>\n"
+                prompt+="  Agent Progress:\n"
+                prompt+="  - <agent>: <status> — <summary>\n"
+                prompt+="  --- END CONTEXT ---\n\n"
+                prompt+="  Instructions:\n"
+                prompt+="  1. ...\n"
+                prompt+="  2. ...\n\n"
             else
-                prompt+="### Issue Summaries\n"
-                prompt+="When you receive a TASK, read the issue summary first (replace {N} with the issue number):\n"
-                prompt+="  cat '${CONTEXT_DIR}/summaries/issue-{N}.md' 2>/dev/null || echo 'No summary yet'\n\n"
-                prompt+="If you discover something the next agent should know, append a brief note:\n"
-                prompt+="  bash '${PROMPT_DIR}/save-summary.sh' issue-{N} 'your note here'\n\n"
+                prompt+="### Shared Context\n"
+                prompt+="Your TASK message includes a CONTEXT PACKET with all the information you need.\n"
+                prompt+="You do NOT need to read external state files — everything is in the message.\n\n"
+                prompt+="If you discover something important, update the shared state:\n"
+                prompt+="  bash '${PROMPT_DIR}/update-state.sh' '${STATE_FILE}' update-agent ${agent} working '<progress note>'\n\n"
             fi
         fi
 
@@ -1541,6 +1640,22 @@ PYEOF
         echo "${tools_list%,}"
     }
 
+    # Map workflow.yaml tools to Codex sandbox mode
+    get_codex_sandbox_mode() {
+        local agent="$1"
+        local has_write=false
+        while IFS= read -r tool; do
+            case "$tool" in
+                edit|write) has_write=true ;;
+            esac
+        done < <(yq_get ".agents.$agent.tools[]" 2>/dev/null)
+        if [ "$has_write" = true ]; then
+            echo "workspace-write"
+        else
+            echo "read-only"
+        fi
+    }
+
     generate_launcher() {
         local agent="$1"
         local interactive
@@ -1549,6 +1664,10 @@ PYEOF
         label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
         local allowed_tools auto_start_agent
         allowed_tools=$(get_allowed_tools "$agent")
+        local provider model codex_sandbox
+        provider=$(yq_get ".agents.$agent.provider // \"claude\"")
+        model=$(yq_get ".agents.$agent.model // \"\"")
+        codex_sandbox=$(get_codex_sandbox_mode "$agent")
         # Find the auto_start agent (architect) for DONE callbacks
         auto_start_agent=""
         auto_start_label=""
@@ -1577,6 +1696,9 @@ PYEOF
     PROMPT_DIR='${PROMPT_DIR}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+    _PROVIDER='${provider}'
+    _MODEL='${model}'
+    _CODEX_SANDBOX='${codex_sandbox}'
 
     # Agent list (non-interactive agents from workflow.yaml)
     AGENT_LIST="${_agent_list}"
@@ -1766,7 +1888,11 @@ PYEOF
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
                 echo ""
-                echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                if [ "\$_PROVIDER" = "codex" ]; then
+                    printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$PROMPT" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+                else
+                    echo "\$PROMPT" | claude -p --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                fi
                 _pm_pause
                 ;;
             quit|exit)
@@ -1776,7 +1902,11 @@ PYEOF
             *)
                 # Unrecognized — fall back to LLM
                 echo ""
-                echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                if [ "\$_PROVIDER" = "codex" ]; then
+                    printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$INPUT" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+                else
+                    echo "\$INPUT" | claude -p --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                fi
                 _pm_pause
                 ;;
         esac
@@ -1794,13 +1924,16 @@ LAUNCHER
     printf '\033]0;${label}\007'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
-    
+    _PROVIDER='${provider}'
+    _MODEL='${model}'
+    _CODEX_SANDBOX='${codex_sandbox}'
+
     echo "╔══════════════════════════════════════╗"
     echo "║  ${label} agent"
     echo "║  Starting up..."
     echo "╚══════════════════════════════════════╝"
     echo ""
-    
+
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
 
@@ -1825,17 +1958,28 @@ LAUNCHER
         printf '%s' "\$_collected"
     }
 
+    # Provider-aware CLI invocation
+    _run_agent_cli() {
+        local _msg="\$1"
+        if [ "\$_PROVIDER" = "codex" ]; then
+            printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$_msg" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+        else
+            claude --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$_msg"
+        fi
+        return \$?
+    }
+
     while true; do
         # Check for pending trigger files (messages arrived while session was down)
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             echo "running \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
             echo "--- [\$(date '+%H:%M:%S')] Found pending message (\${#PENDING_MSG} chars) — feeding to session ---"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            _run_agent_cli "\$PENDING_MSG"
             _CLAUDE_EXIT=\$?
         else
             echo "running \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+            _run_agent_cli "\$INIT_PROMPT"
             _CLAUDE_EXIT=\$?
         fi
         echo ""
@@ -1856,7 +2000,7 @@ LAUNCHER
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
             echo "--- [\$(date '+%H:%M:%S')] Found pending message during post-session check (\${#PENDING_MSG} chars) ---"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            _run_agent_cli "\$PENDING_MSG"
         fi
         sleep 5
     done
@@ -1870,6 +2014,9 @@ LAUNCHER
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+    _PROVIDER='${provider}'
+    _MODEL='${model}'
+    _CODEX_SANDBOX='${codex_sandbox}'
 
     echo "╔══════════════════════════════════════╗"
     echo "║  ${label} agent"
@@ -1924,7 +2071,11 @@ LAUNCHER
                 # Clean done-sent marker from previous run
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
                 # Pipe from file to avoid CLI argument length limits on long messages
-                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                if [ "\$_PROVIDER" = "codex" ]; then
+                    printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$(cat "\$WORK_FILE")" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+                else
+                    cat "\$WORK_FILE" | claude -p --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                fi
                 _CLAUDE_EXIT=\$?
                 echo ""
                 # Auto-notify: only send DONE if the agent didn't already send it

@@ -178,33 +178,35 @@ launcher() {
 # Auto-start (architect/lead/planner) launchers
 # ══════════════════════════════════════════════════════════════════
 
-@test "auto_start: startup-team architect has restart loop" {
+@test "auto_start: startup-team architect has waiting loop" {
     generate_all "startup-team.yaml"
-    grep -q 'sleep 5' "$(launcher architect)"
     grep -q 'while true' "$(launcher architect)"
+    grep -q 'No ready tickets found. Waiting for the PM to send one.' "$(launcher architect)"
 }
 
-@test "auto_start: parallel-workers lead has restart loop" {
+@test "auto_start: parallel-workers lead checks ready tickets before Claude" {
     generate_all "parallel-workers.yaml"
-    grep -q 'sleep 5' "$(launcher lead)"
+    grep -q 'CMD_LIST_READY' "$(launcher lead)"
+    grep -q '_has_ready_ticket' "$(launcher lead)"
 }
 
-@test "auto_start: bidirectional planner has restart loop" {
+@test "auto_start: bidirectional planner only retries on errors" {
     generate_all "bidirectional.yaml"
-    grep -q 'sleep 5' "$(launcher planner)"
+    grep -q 'Session ended with error. Retrying in 5s' "$(launcher planner)"
 }
 
-@test "auto_start: checks for pending trigger before restart" {
+@test "auto_start: checks for pending trigger and ready tickets before Claude" {
     generate_all "startup-team.yaml"
     grep -q 'TRIGGER_FILE' "$(launcher architect)"
     grep -q 'PENDING_MSG' "$(launcher architect)"
+    grep -q '_has_ready_ticket' "$(launcher architect)"
 }
 
 @test "auto_start: writes .state file" {
     generate_all "startup-team.yaml"
-    grep -q '\.state"' "$(launcher architect)"
-    grep -q 'working.*date +%s' "$(launcher architect)"
-    grep -q 'idle.*date +%s' "$(launcher architect)"
+    grep -q 'STATE_HELPER' "$(launcher architect)"
+    grep -q "running \"initial planning\"" "$(launcher architect)"
+    grep -q "idle \"waiting\"" "$(launcher architect)"
 }
 
 @test "auto_start: has .work-done COMPLETE marker" {
@@ -280,23 +282,79 @@ launcher() {
 }
 
 # ══════════════════════════════════════════════════════════════════
-# Dashboard (source template — legitimately checked in binary since
-# screen-logger.py is a heredoc template, not fixture-generated)
+# Dashboard generation is tmux-based in source
 # ══════════════════════════════════════════════════════════════════
 
-@test "dashboard: render_dashboard function exists in source" {
-    grep -q 'def render_dashboard' "$DUNNO_WORKFLOW"
+@test "dashboard: tmux is required for dashboard panes" {
+    grep -q 'tmux is required for dashboard panes' "$DUNNO_WORKFLOW"
 }
 
-@test "dashboard: uses ANSI cursor control" {
-    grep -q '033\[s' "$DUNNO_WORKFLOW"
-    grep -q '033\[H' "$DUNNO_WORKFLOW"
+@test "dashboard: generates tmux-backed status script" {
+    grep -q 'dashboard-status.sh' "$DUNNO_WORKFLOW"
+    grep -q 'tmux new-session -d -s "\\$SESSION"' "$DUNNO_WORKFLOW"
 }
 
-@test "dashboard: shows task counts" {
-    grep -q 'done.*ongoing.*pending' "$DUNNO_WORKFLOW"
+@test "dashboard: debug logs use tmux instead of python screen scraping" {
+    grep -q 'dashboard-logs.sh' "$DUNNO_WORKFLOW"
+    ! grep -q 'screen-logger.py' "$DUNNO_WORKFLOW"
 }
 
-@test "dashboard: tracks session elapsed time" {
-    grep -q 'SESSION_START' "$DUNNO_WORKFLOW"
+@test "dashboard: status pane no longer uses python renderer" {
+    ! grep -q 'status-panel.py' "$DUNNO_WORKFLOW"
+}
+
+# ══════════════════════════════════════════════════════════════════
+# Multi-provider support
+# ══════════════════════════════════════════════════════════════════
+
+@test "provider: claude worker passes --model flag" {
+    generate_all "multi-provider.yaml"
+    grep -q '\-\-model' "$(launcher lead)"
+}
+
+@test "provider: codex worker uses codex exec" {
+    generate_all "multi-provider.yaml"
+    grep -q 'codex exec' "$(launcher worker)"
+}
+
+@test "provider: codex worker uses conditional provider branching" {
+    generate_all "multi-provider.yaml"
+    grep -q 'if \[ "\$_PROVIDER" = "codex" \]' "$(launcher worker)"
+}
+
+@test "provider: codex worker has _PROVIDER=codex" {
+    generate_all "multi-provider.yaml"
+    grep -q "_PROVIDER='codex'" "$(launcher worker)"
+}
+
+@test "provider: claude agent has _PROVIDER=claude" {
+    generate_all "multi-provider.yaml"
+    grep -q "_PROVIDER='claude'" "$(launcher lead)"
+}
+
+@test "provider: codex worker has correct model" {
+    generate_all "multi-provider.yaml"
+    grep -q "_MODEL='o3'" "$(launcher worker)"
+}
+
+@test "provider: codex worker has workspace-write sandbox" {
+    generate_all "multi-provider.yaml"
+    grep -q "_CODEX_SANDBOX='workspace-write'" "$(launcher worker)"
+}
+
+@test "provider: claude lead has read-only sandbox" {
+    generate_all "multi-provider.yaml"
+    grep -q "_CODEX_SANDBOX='read-only'" "$(launcher lead)"
+}
+
+@test "provider: default provider is claude when omitted" {
+    generate_all "minimal-valid.yaml"
+    grep -q "_PROVIDER='claude'" "$(launcher lead)"
+}
+
+@test "provider: multi-provider generates correct launcher count" {
+    generate_all "multi-provider.yaml"
+    local count
+    count=$(ls "$TEST_WORK_DIR/.team-prompts"/run-*.sh | wc -l | tr -d ' ')
+    [ "$count" -eq 2 ]
 }

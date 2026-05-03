@@ -220,3 +220,19 @@ load test_helper
     [ "$status" -eq 0 ]
     [[ "$output" == *"dunno-workflow v"* ]]
 }
+
+# ── Provider validation ──
+
+@test "validate: rejects invalid provider" {
+    use_fixture "invalid-provider.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid provider"* ]]
+}
+
+@test "validate: multi-provider config passes" {
+    use_fixture "multi-provider.yaml"
+    run run_in_dir "$TEST_WORK_DIR" validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"workflow.yaml is valid"* ]]
+}

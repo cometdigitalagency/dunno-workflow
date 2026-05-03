@@ -54,6 +54,11 @@ done
 PROMPT_DIR="${WORK_DIR}/.team-prompts"
 mkdir -p "$PROMPT_DIR"
 
+# Shared memory disabled by default in test helper
+MEMORY_ENABLED="false"
+CONTEXT_DIR=""
+MEMORY_AGENTS_DOC="AGENTS.md"
+
 # ── Ticket Source Commands ──
 case "$TICKET_SOURCE" in
     github)
@@ -229,6 +234,22 @@ get_allowed_tools() {
     echo "${tools_list%,}"
 }
 
+# Map workflow.yaml tools to Codex sandbox mode
+get_codex_sandbox_mode() {
+    local agent="$1"
+    local has_write=false
+    while IFS= read -r tool; do
+        case "$tool" in
+            edit|write) has_write=true ;;
+        esac
+    done < <(yq_get ".agents.$agent.tools[]" 2>/dev/null)
+    if [ "$has_write" = true ]; then
+        echo "workspace-write"
+    else
+        echo "read-only"
+    fi
+}
+
 # ── Generate send-to-agent.sh (test version — no AppleScript/ACK) ──
 generate_send_to_agent() {
     cat > "$PROMPT_DIR/send-to-agent.sh" << 'HELPER'
@@ -284,6 +305,10 @@ generate_launcher() {
     label=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
     local allowed_tools
     allowed_tools=$(get_allowed_tools "$agent")
+    local provider model codex_sandbox
+    provider=$(yq_get ".agents.$agent.provider // \"claude\"")
+    model=$(yq_get ".agents.$agent.model // \"\"")
+    codex_sandbox=$(get_codex_sandbox_mode "$agent")
 
     # Find the auto_start agent for DONE callbacks
     local auto_start_agent="" auto_start_label=""
@@ -313,6 +338,9 @@ generate_launcher() {
     PROMPT_DIR='${PROMPT_DIR}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+    _PROVIDER='${provider}'
+    _MODEL='${model}'
+    _CODEX_SANDBOX='${codex_sandbox}'
 
     AGENT_LIST="${_agent_list}"
 
@@ -362,10 +390,20 @@ generate_launcher() {
                 ;;
             ai\ *)
                 PROMPT=\$(echo "\$INPUT" | sed 's/^ai *//')
-                echo "\$PROMPT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}"
+                if [ "\$_PROVIDER" = "codex" ]; then
+                    printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$PROMPT" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+                else
+                    echo "\$PROMPT" | claude -p --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}"
+                fi
                 ;;
             quit|exit) break ;;
-            *) echo "\$INPUT" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" ;;
+            *)
+                if [ "\$_PROVIDER" = "codex" ]; then
+                    printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$INPUT" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+                else
+                    echo "\$INPUT" | claude -p --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}"
+                fi
+                ;;
         esac
     done
 LAUNCHER
@@ -380,9 +418,13 @@ LAUNCHER
     printf '\033]0;${label}\007'
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     INIT_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-init.txt')
+    CMD_LIST_READY='${TICKET_LIST_READY}'
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
-    echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+    _PROVIDER='${provider}'
+    _MODEL='${model}'
+    _CODEX_SANDBOX='${codex_sandbox}'
+    echo "idle \$(date +%s) starting" > "\$TRIGGER_DIR/${agent}.state"
     _collect_triggers() {
         local _collected=""
         for TRIGGER_FILE in "\$TRIGGER_DIR/${agent}.from-"*.trigger; do
@@ -398,22 +440,60 @@ LAUNCHER
         fi
         printf '%s' "\$_collected"
     }
+    _has_ready_ticket() {
+        local _ready=""
+        if [ -n "\$CMD_LIST_READY" ]; then
+            _ready=\$(eval "\$CMD_LIST_READY" 2>/dev/null || true)
+        fi
+        [ -n "\$(printf '%s' "\$_ready" | tr -d '[:space:]')" ]
+    }
+    _STATE_FILE='${STATE_FILE}'
+    _inject_issue_context() {
+        local _msg="\$1"
+        if [ -z "\$_STATE_FILE" ] || [ ! -f "\$_STATE_FILE" ]; then printf '%s' "\$_msg"; return; fi
+        if ! printf '%s' "\$_msg" | grep -qiE "^DONE-[a-z]"; then printf '%s' "\$_msg"; return; fi
+        local _ctx
+        _ctx=\$(jq -r '.current_issue // empty | "Issue #\(.id): \(.title)\nContext: \(.context)"' "\$_STATE_FILE" 2>/dev/null)
+        if [ -z "\$_ctx" ]; then printf '%s' "\$_msg"; return; fi
+        printf '%s\n\n---\n%s' "\$_ctx" "\$_msg"
+    }
+    # Provider-aware CLI invocation
+    _run_agent_cli() {
+        local _msg="\$1"
+        if [ "\$_PROVIDER" = "codex" ]; then
+            printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$_msg" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+        else
+            env -u ANTHROPIC_API_KEY claude --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$_msg"
+        fi
+        return \$?
+    }
     while true; do
         PENDING_MSG=\$(_collect_triggers)
         if [ -n "\$PENDING_MSG" ]; then
-            echo "working \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$PENDING_MSG"
+            PENDING_MSG=\$(_inject_issue_context "\$PENDING_MSG")
+            echo "running \$(date +%s) \${PENDING_MSG:0:50}" > "\$TRIGGER_DIR/${agent}.state"
+            _run_agent_cli "\$PENDING_MSG"
+        elif _has_ready_ticket; then
+            echo "running \$(date +%s) initial planning" > "\$TRIGGER_DIR/${agent}.state"
+            _run_agent_cli "\$INIT_PROMPT"
         else
-            echo "working \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
-            claude --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}" "\$INIT_PROMPT"
+            echo "idle \$(date +%s) waiting" > "\$TRIGGER_DIR/${agent}.state"
+            echo "No ready tickets found. Waiting for the PM to send one."
+            sleep 2
+            continue
         fi
-        echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
+        if [ "\$?" -ne 0 ]; then
+            echo "retrying \$(date +%s) session restart in 5s" > "\$TRIGGER_DIR/${agent}.state"
+            echo "--- [\$(date '+%H:%M:%S')] Session ended with error. Retrying in 5s... ---"
+            sleep 5
+        else
+            echo "idle \$(date +%s) waiting" > "\$TRIGGER_DIR/${agent}.state"
+        fi
         COMPLETE_MARKER="\$TRIGGER_DIR/.work-done"
         if [ -f "\$COMPLETE_MARKER" ]; then
             '${PROMPT_DIR}/send-to-agent.sh' PM "COMPLETE: All tasks finished (auto-notify)"
             rm -f "\$COMPLETE_MARKER"
         fi
-        sleep 5
     done
 LAUNCHER
         else
@@ -424,6 +504,9 @@ LAUNCHER
     SYSTEM_PROMPT=\$(cat '${PROMPT_DIR}/${agent}-system.txt')
     TRIGGER_DIR='${PROMPT_DIR}/triggers'
     mkdir -p "\$TRIGGER_DIR"
+    _PROVIDER='${provider}'
+    _MODEL='${model}'
+    _CODEX_SANDBOX='${codex_sandbox}'
     echo "idle \$(date +%s)" > "\$TRIGGER_DIR/${agent}.state"
     _collect_worker_triggers() {
         local _work="\$TRIGGER_DIR/${agent}.msg"
@@ -457,7 +540,11 @@ LAUNCHER
                 TASK_PREVIEW=\$(head -c 50 "\$WORK_FILE")
                 echo "working \$(date +%s) \$TASK_PREVIEW" > "\$TRIGGER_DIR/${agent}.state"
                 rm -f "\$TRIGGER_DIR/${agent}.done-sent"
-                cat "\$WORK_FILE" | claude -p --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                if [ "\$_PROVIDER" = "codex" ]; then
+                    printf '%s\n\n---\n\n%s' "\$SYSTEM_PROMPT" "\$(cat "\$WORK_FILE")" | codex exec -m "\$_MODEL" -s "\$_CODEX_SANDBOX" --full-auto -
+                else
+                    cat "\$WORK_FILE" | claude -p --model "\$_MODEL" --append-system-prompt "\$SYSTEM_PROMPT" --allowedTools "${allowed_tools}" -n "${agent}"
+                fi
                 if [ ! -f "\$TRIGGER_DIR/${agent}.done-sent" ]; then
                     '${PROMPT_DIR}/send-to-agent.sh' '${auto_start_label}' "DONE-${agent}: Task completed (auto-notify)"
                 fi
