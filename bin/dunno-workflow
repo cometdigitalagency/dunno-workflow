@@ -2941,7 +2941,7 @@ PYMONITOR
         osascript << OSAEND 2>/dev/null
 tell application "iTerm"
     activate
-    set newWin to (create window with default profile command "tmux attach-session -t ${session}")
+    set newWin to (create window with default profile command "$(command -v tmux) attach-session -t ${session}")
     set bounds of newWin to {0, 0, 9999, 9999}
 end tell
 OSAEND
